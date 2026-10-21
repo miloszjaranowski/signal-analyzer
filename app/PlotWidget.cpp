@@ -141,20 +141,16 @@ void PlotWidget::paintEvent(QPaintEvent*) {
 
     p.setClipRect(area);
 
-    if (!markers_.empty()) {
-        QPen markerPen(QColor(230, 140, 40, 200));  // reads on light and dark palettes
-        markerPen.setStyle(Qt::DashLine);
-        const QFontMetrics fm = p.fontMetrics();
-        for (const Marker& m : markers_) {
-            if (m.x < x0 || m.x > x1) {
-                continue;
-            }
-            const double px = toPx(m.x, y0).x();
-            p.setPen(markerPen);
-            p.drawLine(QPointF(px, area.top()), QPointF(px, area.bottom()));
-            p.setPen(markerPen.color());
-            p.drawText(QPointF(px + 3, area.top() + fm.ascent() + 2), m.label);
+    const QFontMetrics fm = p.fontMetrics();
+    for (const Marker& m : markers_) {
+        if (m.x < x0 || m.x > x1) {
+            continue;
         }
+        const double px = toPx(m.x, y0).x();
+        p.setPen(QPen(m.color, 1.0, m.style));
+        p.drawLine(QPointF(px, area.top()), QPointF(px, area.bottom()));
+        p.setPen(m.color);
+        p.drawText(QPointF(px + 3, area.top() + 2 + fm.ascent() + m.labelRow * fm.height()), m.label);
     }
 
     p.setRenderHint(QPainter::Antialiasing, true);

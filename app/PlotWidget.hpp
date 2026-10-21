@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QColor>
 #include <QString>
 #include <QWidget>
 
@@ -13,10 +14,13 @@ class PlotWidget : public QWidget {
     Q_OBJECT
 
 public:
-    // Dashed vertical line with a short label at the top, e.g. a fault harmonic.
+    // Vertical line with a short label near the top, e.g. a fault harmonic.
     struct Marker {
         double x = 0.0;
         QString label;
+        QColor color = QColor(230, 140, 40);  // reads on light and dark palettes
+        Qt::PenStyle style = Qt::DashLine;
+        int labelRow = 0;  // 0 = first text line under the top edge, 1 = second, ...
     };
 
     explicit PlotWidget(QString title, QString xUnit, QString yUnit, QWidget* parent = nullptr);

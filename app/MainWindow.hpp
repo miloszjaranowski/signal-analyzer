@@ -14,6 +14,7 @@ class QLabel;
 class QPushButton;
 class QSpinBox;
 class QTimer;
+class BearingPanel;
 class PlotWidget;
 class SpectrogramWidget;
 
@@ -53,12 +54,14 @@ private:
     PlotWidget* envelopePlot_ = nullptr;
     PlotWidget* spectrumPlot_ = nullptr;
     SpectrogramWidget* spectrogram_ = nullptr;
+    BearingPanel* bearingPanel_ = nullptr;
 
     QLabel* rmsLabel_ = nullptr;
     QLabel* peakLabel_ = nullptr;
     QLabel* crestLabel_ = nullptr;
     QLabel* domFreqLabel_ = nullptr;
     QLabel* envPeakLabel_ = nullptr;
+    QLabel* bearingLabel_ = nullptr;
     QLabel* rateLabel_ = nullptr;
     QLabel* linkLabel_ = nullptr;
 

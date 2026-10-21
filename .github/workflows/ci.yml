@@ -69,3 +69,8 @@ jobs:
           ./build/sa_cli --seconds 5 | tee env.log
           tail -1 env.log | grep -E "f_dom=50\.[0-9]+ Hz"     # raw spectrum: rotation tone
           tail -1 env.log | grep -E "f_env=8[67]\.[0-9]+ Hz"  # envelope: impact rate
+      - name: End-to-end bearing diagnosis (SKF 6205 at 3000 rpm, outer race, 1 % slip)
+        run: |
+          python simulator/sensor_sim.py --duration 6 --fault-hz 177.5 --fault-amp 0.3 --seed 1 &
+          ./build/sa_cli --rpm 3000 --seconds 5 | tee bearing.log
+          tail -1 bearing.log | grep -E "match=BPFO 1x"

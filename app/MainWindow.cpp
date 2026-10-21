@@ -2,6 +2,7 @@
 
 #include <QCheckBox>
 #include <QComboBox>
+#include <QDockWidget>
 #include <QDoubleSpinBox>
 #include <QGridLayout>
 #include <QGroupBox>
@@ -16,8 +17,10 @@
 
 #include <algorithm>
 
+#include "BearingPanel.hpp"
 #include "PlotWidget.hpp"
 #include "SpectrogramWidget.hpp"
+#include "sa/Bearing.hpp"
 #include "sa/Dsp.hpp"
 
 namespace {
@@ -25,10 +28,6 @@ namespace {
 // Shared by the spectrum plot (in dB mode) and the spectrogram colour scale.
 constexpr double kDbFloor = -100.0;
 constexpr double kDbCeiling = 10.0;
-
-// Envelope peaks less prominent than this are indistinguishable from noise:
-// measured ~12-14 dB for band noise alone, 30+ dB for a weak simulated fault.
-constexpr float kClearLineDb = 20.0f;
 
 QLabel* makeValueLabel() {
     auto* label = new QLabel(QStringLiteral("—"));
@@ -142,6 +141,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     crestLabel_ = makeValueLabel();
     domFreqLabel_ = makeValueLabel();
     envPeakLabel_ = makeValueLabel();
+    bearingLabel_ = makeValueLabel();
     rateLabel_ = makeValueLabel();
     linkLabel_ = makeValueLabel();
 
@@ -164,6 +164,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     addMetric(tr("Envelope peak"), envPeakLabel_);
     addMetric(tr("Sample rate"), rateLabel_);
     addMetric(tr("Link"), linkLabel_);
+    addMetric(tr("Bearing"), bearingLabel_);
     metrics->setColumnStretch(kMetricsPerRow * 2, 1);
 
     auto* central = new QWidget;
@@ -180,6 +181,18 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     setCentralWidget(central);
     statusBar()->showMessage(tr("Stopped. Start the Python simulator, then press Start."));
 
+    // --- Bearing defect frequencies (side panel) --------------------------------
+    bearingPanel_ = new BearingPanel;
+    connect(bearingPanel_, &BearingPanel::changed, this, [this] {
+        if (shownFrame_) {
+            showFrame(*shownFrame_);
+        }
+    });
+    auto* bearingDock = new QDockWidget(tr("Bearing"), this);
+    bearingDock->setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable);
+    bearingDock->setWidget(bearingPanel_);
+    addDockWidget(Qt::RightDockWidgetArea, bearingDock);
+
     updateSpectrumScale();
 
     // ~30 FPS UI refresh, decoupled from the acquisition rate.
@@ -187,7 +200,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     refreshTimer_->setInterval(33);
     connect(refreshTimer_, &QTimer::timeout, this, &MainWindow::refresh);
 
-    resize(1100, 940);
+    resize(1380, 940);
 }
 
 MainWindow::~MainWindow() { stopPipeline(); }
@@ -322,15 +335,24 @@ void MainWindow::showFrame(const sa::AnalysisFrame& frame) {
                                 .arg(frame.envelopeBandLoHz, 0, 'f', 0)
                                 .arg(frame.envelopeBandHiHz, 0, 'f', 0));
     envelopePlot_->setData(frame.envelopeSpectrum, 0.0, frame.binHz);
-    // Harmonics of a clear envelope line: a fault shows a whole series.
-    const bool clearLine = frame.envelopePeakProminenceDb >= kClearLineDb;
-    std::vector<PlotWidget::Marker> harmonics;
+    // Harmonics of a clear envelope line (a fault shows a whole series), and the
+    // expected bearing defect frequencies on a second label row.
+    const bool clearLine = frame.envelopePeakProminenceDb >= sa::kClearLineDb;
+    const auto& bearing = bearingPanel_->frequencies();
+    std::vector<PlotWidget::Marker> markers;
     if (clearLine) {
         for (int h = 1; h <= 5; ++h) {
-            harmonics.push_back({h * double(frame.envelopePeakHz), QStringLiteral("%1×").arg(h)});
+            markers.push_back({h * double(frame.envelopePeakHz), QStringLiteral("%1×").arg(h)});
         }
     }
-    envelopePlot_->setMarkers(std::move(harmonics));
+    if (bearing && bearingPanel_->markOnEnvelope()) {
+        for (const sa::BearingFault fault : sa::kBearingFaults) {
+            markers.push_back({sa::frequencyOf(*bearing, fault),
+                               QString::fromUtf8(sa::shortName(fault)), faultColor(fault),
+                               Qt::DotLine, 1});
+        }
+    }
+    envelopePlot_->setMarkers(std::move(markers));
 
     rmsLabel_->setText(QString::number(frame.rms, 'f', 4));
     peakLabel_->setText(QString::number(frame.peak, 'f', 4));
@@ -342,5 +364,19 @@ void MainWindow::showFrame(const sa::AnalysisFrame& frame) {
                                            .arg(frame.envelopePeakHz, 0, 'f', 2)
                                            .arg(prominence)
                                      : tr("none (%1)").arg(prominence));
+
+    QString diagnosis = QStringLiteral("—");
+    if (clearLine && bearing) {
+        if (const auto match = sa::matchBearingFault(*bearing, frame.envelopePeakHz)) {
+            diagnosis = tr("%1 %2× (%3), %4 %")
+                            .arg(QString::fromUtf8(sa::shortName(match->fault)))
+                            .arg(match->harmonic)
+                            .arg(QString::fromUtf8(sa::description(match->fault)))
+                            .arg(QString::asprintf("%+.1f", match->errorPercent));
+        } else {
+            diagnosis = tr("no defect frequency matches");
+        }
+    }
+    bearingLabel_->setText(diagnosis);
     rateLabel_->setText(QStringLiteral("%1 Hz").arg(frame.sampleRate));
 }

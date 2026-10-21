@@ -77,4 +77,8 @@ float dominantFrequency(std::span<const float> spectrum, float binHz);
 // so this tells a real dominantFrequency() from the highest bump of the noise.
 float peakProminenceDb(std::span<const float> spectrum);
 
+// Prominence above which an envelope line is taken as real: band noise alone
+// measures ~12-14 dB, a weak simulated bearing fault 30 dB or more.
+inline constexpr float kClearLineDb = 20.0f;
+
 }  // namespace sa

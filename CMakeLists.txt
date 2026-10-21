@@ -35,6 +35,7 @@ find_package(Threads REQUIRED)
 # Core library: networking, ring buffer, DSP, threading. No Qt dependency.
 # ---------------------------------------------------------------------------
 add_library(sa_core
+  core/src/Bearing.cpp
   core/src/Protocol.cpp
   core/src/Dsp.cpp
   core/src/Udp.cpp
@@ -58,6 +59,8 @@ if(SA_BUILD_GUI)
     qt_standard_project_setup()
     qt_add_executable(signal_analyzer
       app/main.cpp
+      app/BearingPanel.cpp
+      app/BearingPanel.hpp
       app/MainWindow.cpp
       app/MainWindow.hpp
       app/PlotFrame.cpp
@@ -93,6 +96,7 @@ if(SA_BUILD_TESTS)
 
   enable_testing()
   add_executable(sa_tests
+    tests/test_bearing.cpp
     tests/test_ring_buffer.cpp
     tests/test_dsp.cpp
     tests/test_protocol_pipeline.cpp)
