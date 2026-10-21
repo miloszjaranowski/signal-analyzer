@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cmath>
 #include <numbers>
+#include <stdexcept>
 #include <thread>
 #include <vector>
 
@@ -112,6 +113,18 @@ TEST(Pipeline, AnalysesSineAndCountsLostPackets) {
     EXPECT_NEAR(frame->dominantHz, kFreq, 1.0);
     EXPECT_NEAR(frame->rms, 1.0 / std::sqrt(2.0), 0.02);
     EXPECT_TRUE(pipeline.lastError().empty());
+}
+
+TEST(Pipeline, RejectsInvalidEnvelopeBand) {
+    sa::PipelineConfig cfg;
+    cfg.envelopeBandLoHz = 3000.0f;
+    cfg.envelopeBandHiHz = 2000.0f;
+    EXPECT_THROW(sa::Pipeline{cfg}, std::invalid_argument);
+
+    sa::Pipeline pipeline(sa::PipelineConfig{});
+    EXPECT_THROW(pipeline.setEnvelopeBand(-1.0f, 100.0f), std::invalid_argument);
+    EXPECT_THROW(pipeline.setEnvelopeBand(500.0f, 500.0f), std::invalid_argument);
+    EXPECT_NO_THROW(pipeline.setEnvelopeBand(0.0f, 500.0f));
 }
 
 TEST(Pipeline, FramesSinceReturnsRecentFramesInOrder) {

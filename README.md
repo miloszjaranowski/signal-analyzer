@@ -13,7 +13,10 @@ desktop app displays the waveform, FFT and a scrolling spectrogram live.
 - **Two worker threads** (`std::jthread` + `std::stop_token`), UI decoupled at ~30 FPS
 - **Own radix-2 FFT**, Hann window with amplitude-correct scaling, sub-bin dominant
   frequency via parabolic interpolation
-- **Metrics:** RMS, peak, crest factor, dominant frequency
+- **Envelope analysis** for bearing faults: band-pass and Hilbert transform in one
+  frequency-domain step, envelope spectrum with harmonic markers, peak prominence to tell
+  a fault line from noise; the band is tunable while running
+- **Metrics:** RMS, peak, crest factor, dominant frequency, envelope peak
 - **Link diagnostics:** lost packets (sequence gaps), malformed packets, buffer overruns
 - **Cross-platform sockets** (BSD sockets / Winsock) behind a small RAII wrapper
 - **Qt 6 GUI** with a custom `QPainter` plot (min/max decimation per pixel, no QtCharts)
@@ -30,7 +33,7 @@ flowchart LR
     SIM["Python simulator<br/>sensor_sim.py"] -- "UDP, SAP1 packets" --> RX
     subgraph core["sa_core (C++20, no Qt)"]
         RX["Receive thread<br/>parse + sequence check"] --> RB[("SPSC lock-free<br/>ring buffer")]
-        RB --> DSP["DSP thread<br/>Hann + FFT + metrics"]
+        RB --> DSP["DSP thread<br/>Hann + FFT + envelope + metrics"]
         DSP --> FR["recent AnalysisFrames<br/>(shared_ptr, last 64)"]
     end
     FR --> GUI["Qt GUI<br/>QTimer 30 FPS"]
@@ -101,7 +104,7 @@ pip install -r simulator/requirements.txt
 python simulator/sensor_sim.py                    # 50 Hz + harmonics, light noise
 ./build/signal_analyzer                           # press Start
 # or headless:
-./build/sa_cli --port 5005 --fft 4096
+./build/sa_cli --port 5005 --fft 4096 --env-band 1000:4000
 ```
 
 Simulator scenarios:
@@ -112,6 +115,32 @@ python simulator/sensor_sim.py --fault-hz 87 --fault-amp 2   # bearing-like impa
 python simulator/sensor_sim.py --drop 0.02                   # 2 % packet loss -> visible in "Link"
 python simulator/sensor_sim.py --help
 ```
+
+### Envelope analysis
+
+A local bearing defect (a spall on a race) is hit by every rolling element that passes
+it. Each impact rings a structural resonance for a few milliseconds, so the fault shows up
+as bursts of high-frequency vibration repeating at the fault rate (BPFO, BPFI, ...). In
+the plain spectrum this energy is smeared around the resonance and easy to miss; the
+rotation tones dominate.
+
+The DSP thread therefore also computes an **envelope spectrum**:
+
+1. keep only the band around the resonance (default 1000–4000 Hz),
+2. demodulate: the magnitude of the analytic signal (Hilbert transform) is the envelope
+   of the bursts,
+3. take the spectrum of the envelope: the burst repetition rate and its harmonics appear
+   as clear lines.
+
+Steps 1 and 2 are a single frequency-domain operation: FFT, keep the positive-frequency
+bins in the band (doubled), inverse FFT, magnitude. The GUI marks the first five harmonics
+of the strongest line, and reports how far it stands above the median of the envelope
+spectrum. Noise alone reaches ~12–14 dB, a real fault line 30 dB or more, so lines under
+20 dB are reported as "none".
+
+Try it with `python simulator/sensor_sim.py --fault-hz 87 --fault-amp 0.3`: the raw
+spectrum shows only the 50 Hz harmonics, the envelope spectrum shows 87 Hz, 174 Hz, ...
+If the resonance is elsewhere (`--resonance-hz`), move the envelope band to cover it.
 
 ## Project layout
 
@@ -126,7 +155,8 @@ simulator/ Python UDP sensor simulator
 ## Roadmap
 
 - [x] Spectrogram (waterfall) view
-- [ ] Envelope analysis for bearing fault frequencies
+- [x] Envelope analysis for bearing fault frequencies
+- [ ] Bearing fault frequency calculator (BPFO/BPFI/BSF/FTF from geometry and shaft speed)
 - [ ] Rainflow cycle counting and fatigue damage estimate (Miner's rule)
 - [ ] Multi-channel streams
 - [ ] Recording to file / replay (CSV, HDF5)

@@ -63,3 +63,9 @@ jobs:
           python simulator/sensor_sim.py --duration 6 --tones 120:1 --seed 1 &
           ./build/sa_cli --seconds 5 | tee cli.log
           tail -1 cli.log | grep -E "f_dom=1(19|20)\.[0-9]+ Hz"
+      - name: End-to-end envelope analysis (simulated bearing fault at 87 Hz)
+        run: |
+          python simulator/sensor_sim.py --duration 6 --fault-hz 87 --fault-amp 0.3 --seed 1 &
+          ./build/sa_cli --seconds 5 | tee env.log
+          tail -1 env.log | grep -E "f_dom=50\.[0-9]+ Hz"     # raw spectrum: rotation tone
+          tail -1 env.log | grep -E "f_env=8[67]\.[0-9]+ Hz"  # envelope: impact rate

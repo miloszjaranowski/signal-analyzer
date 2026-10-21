@@ -25,6 +25,16 @@ void PlotWidget::setData(std::vector<float> y, double xStart, double xStep) {
     update();
 }
 
+void PlotWidget::setMarkers(std::vector<Marker> markers) {
+    markers_ = std::move(markers);
+    update();
+}
+
+void PlotWidget::setTitle(const QString& title) {
+    title_ = title;
+    update();
+}
+
 void PlotWidget::setYUnit(const QString& unit) {
     yUnit_ = unit;
     update();
@@ -130,6 +140,23 @@ void PlotWidget::paintEvent(QPaintEvent*) {
     }
 
     p.setClipRect(area);
+
+    if (!markers_.empty()) {
+        QPen markerPen(QColor(230, 140, 40, 200));  // reads on light and dark palettes
+        markerPen.setStyle(Qt::DashLine);
+        const QFontMetrics fm = p.fontMetrics();
+        for (const Marker& m : markers_) {
+            if (m.x < x0 || m.x > x1) {
+                continue;
+            }
+            const double px = toPx(m.x, y0).x();
+            p.setPen(markerPen);
+            p.drawLine(QPointF(px, area.top()), QPointF(px, area.bottom()));
+            p.setPen(markerPen.color());
+            p.drawText(QPointF(px + 3, area.top() + fm.ascent() + 2), m.label);
+        }
+    }
+
     p.setRenderHint(QPainter::Antialiasing, true);
     QPen dataPen(pal.color(QPalette::Highlight));
     dataPen.setWidthF(1.3);

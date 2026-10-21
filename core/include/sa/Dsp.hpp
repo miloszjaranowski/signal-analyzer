@@ -11,6 +11,9 @@ namespace sa {
 // (throws std::invalid_argument otherwise).
 void fftInPlace(std::vector<std::complex<float>>& data);
 
+// Inverse of fftInPlace, including the 1/N scaling.
+void inverseFftInPlace(std::vector<std::complex<float>>& data);
+
 // Periodic Hann window (the right choice for spectral analysis).
 std::vector<float> hannWindow(std::size_t size);
 
@@ -40,8 +43,38 @@ private:
     std::vector<float> spectrum_;
 };
 
+// Envelope analysis for bearing diagnostics: band-pass around a structural
+// resonance, demodulate (magnitude of the analytic signal) and take the amplitude
+// spectrum of the envelope. Repetitive impacts, e.g. rolling elements hitting a
+// spall, show up as a peak at their repetition rate and its harmonics even when
+// they are buried in the raw spectrum. Band-pass and Hilbert transform are done
+// together in the frequency domain. Buffers are allocated once; compute() does
+// not allocate.
+class EnvelopeAnalyzer {
+public:
+    explicit EnvelopeAnalyzer(std::size_t fftSize);
+
+    // `block` must contain exactly fftSize() samples. Returns the single-sided
+    // amplitude spectrum of the envelope: fftSize()/2 + 1 bins of binHz each.
+    // A band that is empty after clamping to (0, Nyquist) gives all zeros.
+    const std::vector<float>& compute(std::span<const float> block, float binHz,
+                                      float bandLoHz, float bandHiHz);
+
+    std::size_t fftSize() const { return spectrum_.fftSize(); }
+
+private:
+    SpectrumAnalyzer spectrum_;  // first: validates fftSize before the buffers are sized
+    std::vector<std::complex<float>> work_;
+    std::vector<float> envelope_;
+};
+
 // Frequency of the strongest bin (DC excluded), refined with parabolic
 // interpolation between neighbouring bins. Returns 0 for an empty/flat spectrum.
 float dominantFrequency(std::span<const float> spectrum, float binHz);
+
+// How far the strongest bin (DC excluded) stands above the median bin, in dB.
+// A periodic component gives a clear line; noise alone stays within a few dB,
+// so this tells a real dominantFrequency() from the highest bump of the noise.
+float peakProminenceDb(std::span<const float> spectrum);
 
 }  // namespace sa

@@ -13,10 +13,18 @@ class PlotWidget : public QWidget {
     Q_OBJECT
 
 public:
+    // Dashed vertical line with a short label at the top, e.g. a fault harmonic.
+    struct Marker {
+        double x = 0.0;
+        QString label;
+    };
+
     explicit PlotWidget(QString title, QString xUnit, QString yUnit, QWidget* parent = nullptr);
 
     // y[i] is plotted at x = xStart + i * xStep.
     void setData(std::vector<float> y, double xStart, double xStep);
+    void setMarkers(std::vector<Marker> markers);
+    void setTitle(const QString& title);
     void setYUnit(const QString& unit);
     void setFixedYRange(double lo, double hi);
     void setAutoScale(bool symmetric);
@@ -34,6 +42,7 @@ private:
     QString xUnit_;
     QString yUnit_;
     std::vector<float> y_;
+    std::vector<Marker> markers_;
     double xStart_ = 0.0;
     double xStep_ = 1.0;
     double xMax_ = 0.0;

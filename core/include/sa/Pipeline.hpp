@@ -24,6 +24,8 @@ struct PipelineConfig {
     std::size_t waveformSamples = 2048;      // samples kept for the time plot
     std::size_t ringCapacity = 1u << 18;     // ~26 s at 10 kHz
     std::size_t frameHistory = 64;           // recent frames kept for framesSince()
+    float envelopeBandLoHz = 1000.0f;        // band-pass before envelope detection,
+    float envelopeBandHiHz = 4000.0f;        // ideally around a structural resonance
 };
 
 // One analysis result. Immutable once published; shared with the UI by shared_ptr.
@@ -36,6 +38,12 @@ struct AnalysisFrame {
     float dominantHz = 0.0f;
     std::vector<float> waveform;
     std::vector<float> spectrum;  // single-sided amplitude, fftSize/2 + 1 bins
+
+    std::vector<float> envelopeSpectrum;  // amplitude spectrum of the band envelope, same bins
+    float envelopeBandLoHz = 0.0f;        // band the envelope was taken from
+    float envelopeBandHiHz = 0.0f;
+    float envelopePeakHz = 0.0f;          // strongest envelope component, e.g. a fault rate
+    float envelopePeakProminenceDb = 0.0f;  // how far it stands above the envelope noise
 };
 
 struct PipelineStats {
@@ -69,6 +77,10 @@ public:
     std::uint16_t port() const;
     const PipelineConfig& config() const { return config_; }
 
+    // Thread-safe; applies from the next frame. Throws std::invalid_argument
+    // unless 0 <= loHz < hiHz.
+    void setEnvelopeBand(float loHz, float hiHz);
+
     std::shared_ptr<const AnalysisFrame> latestFrame() const;
     // Frames with index > afterIndex, oldest first (at most config().frameHistory).
     // Lets a consumer that polls slower than the DSP rate still see every frame.
@@ -96,6 +108,10 @@ private:
 
     mutable std::mutex frameMutex_;
     std::deque<std::shared_ptr<const AnalysisFrame>> recentFrames_;  // newest at back
+
+    std::mutex bandMutex_;
+    float envelopeBandLoHz_ = 0.0f;
+    float envelopeBandHiHz_ = 0.0f;
 
     mutable std::mutex errorMutex_;
     std::string lastError_;

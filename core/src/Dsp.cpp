@@ -43,6 +43,18 @@ void fftInPlace(std::vector<std::complex<float>>& data) {
     }
 }
 
+void inverseFftInPlace(std::vector<std::complex<float>>& data) {
+    // ifft(x) = conj(fft(conj(x))) / N
+    for (auto& v : data) {
+        v = std::conj(v);
+    }
+    fftInPlace(data);
+    const float scale = 1.0f / static_cast<float>(data.size());
+    for (auto& v : data) {
+        v = std::conj(v) * scale;
+    }
+}
+
 std::vector<float> hannWindow(std::size_t size) {
     std::vector<float> w(size);
     for (std::size_t i = 0; i < size; ++i) {
@@ -106,6 +118,47 @@ const std::vector<float>& SpectrumAnalyzer::compute(std::span<const float> block
     return spectrum_;
 }
 
+EnvelopeAnalyzer::EnvelopeAnalyzer(std::size_t fftSize)
+    : spectrum_(fftSize), work_(fftSize), envelope_(fftSize) {}
+
+const std::vector<float>& EnvelopeAnalyzer::compute(std::span<const float> block, float binHz,
+                                                    float bandLoHz, float bandHiHz) {
+    const std::size_t n = work_.size();
+    if (block.size() != n) {
+        throw std::invalid_argument("Block size must equal FFT size");
+    }
+    if (!(binHz > 0.0f)) {
+        throw std::invalid_argument("binHz must be positive");
+    }
+    for (std::size_t i = 0; i < n; ++i) {
+        work_[i] = {block[i], 0.0f};
+    }
+    fftInPlace(work_);
+
+    // Analytic signal of the band: positive-frequency bins inside the band are
+    // doubled; DC, Nyquist, negative frequencies and everything out of band are zeroed.
+    const double lo = std::max(1.0, std::ceil(double(bandLoHz) / binHz));
+    const double hi = std::min(double(n / 2 - 1), std::floor(double(bandHiHz) / binHz));
+    const auto first = static_cast<std::size_t>(lo);
+    const std::size_t last = hi >= lo ? static_cast<std::size_t>(hi) + 1 : first;  // exclusive
+    for (std::size_t k = 0; k < n; ++k) {
+        work_[k] = (k >= first && k < last) ? 2.0f * work_[k] : std::complex<float>{};
+    }
+    inverseFftInPlace(work_);
+
+    // Remove the mean (the overall level in the band); only its fluctuation matters.
+    double sum = 0.0;
+    for (std::size_t i = 0; i < n; ++i) {
+        envelope_[i] = std::abs(work_[i]);
+        sum += envelope_[i];
+    }
+    const auto mean = static_cast<float>(sum / static_cast<double>(n));
+    for (float& e : envelope_) {
+        e -= mean;
+    }
+    return spectrum_.compute(envelope_);
+}
+
 float dominantFrequency(std::span<const float> spectrum, float binHz) {
     if (spectrum.size() < 3) {
         return 0.0f;
@@ -128,6 +181,17 @@ float dominantFrequency(std::span<const float> spectrum, float binHz) {
         }
     }
     return (static_cast<float>(k) + offset) * binHz;
+}
+
+float peakProminenceDb(std::span<const float> spectrum) {
+    if (spectrum.size() < 3) {
+        return 0.0f;
+    }
+    std::vector<float> bins(spectrum.begin() + 1, spectrum.end());
+    const float peak = *std::max_element(bins.begin(), bins.end());
+    const auto median = bins.begin() + static_cast<std::ptrdiff_t>(bins.size() / 2);
+    std::nth_element(bins.begin(), median, bins.end());
+    return amplitudeToDb(peak) - amplitudeToDb(*median);
 }
 
 }  // namespace sa

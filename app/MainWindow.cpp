@@ -3,7 +3,7 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDoubleSpinBox>
-#include <QFormLayout>
+#include <QGridLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -26,6 +26,10 @@ namespace {
 constexpr double kDbFloor = -100.0;
 constexpr double kDbCeiling = 10.0;
 
+// Envelope peaks less prominent than this are indistinguishable from noise:
+// measured ~12-14 dB for band noise alone, 30+ dB for a weak simulated fault.
+constexpr float kClearLineDb = 20.0f;
+
 QLabel* makeValueLabel() {
     auto* label = new QLabel(QStringLiteral("—"));
     label->setMinimumWidth(110);
@@ -35,6 +39,16 @@ QLabel* makeValueLabel() {
     f.setStyleHint(QFont::Monospace);
     label->setFont(f);
     return label;
+}
+
+QDoubleSpinBox* makeHzSpin(double value) {
+    auto* spin = new QDoubleSpinBox;
+    spin->setRange(0.0, 1'000'000.0);
+    spin->setDecimals(0);
+    spin->setSingleStep(100.0);
+    spin->setSuffix(QStringLiteral(" Hz"));
+    spin->setValue(value);
+    return spin;
 }
 
 }  // namespace
@@ -88,6 +102,28 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     controls->addStretch();
     controls->addWidget(startButton_);
 
+    // --- Envelope analysis controls (the band can be tuned while running) ------
+    const sa::PipelineConfig defaults;
+    envLoSpin_ = makeHzSpin(defaults.envelopeBandLoHz);
+    envHiSpin_ = makeHzSpin(defaults.envelopeBandHiHz);
+    connect(envLoSpin_, &QDoubleSpinBox::valueChanged, this, &MainWindow::applyEnvelopeBand);
+    connect(envHiSpin_, &QDoubleSpinBox::valueChanged, this, &MainWindow::applyEnvelopeBand);
+
+    envMaxFreqSpin_ = makeHzSpin(500.0);
+    envMaxFreqSpin_->setSpecialValueText(tr("Nyquist"));
+    connect(envMaxFreqSpin_, &QDoubleSpinBox::valueChanged, this,
+            [this](double v) { envelopePlot_->setXMax(v); });
+
+    auto* envControls = new QHBoxLayout;
+    envControls->addWidget(new QLabel(tr("Envelope band:")));
+    envControls->addWidget(envLoSpin_);
+    envControls->addWidget(new QLabel(QStringLiteral("–")));
+    envControls->addWidget(envHiSpin_);
+    envControls->addSpacing(12);
+    envControls->addWidget(new QLabel(tr("Envelope max frequency:")));
+    envControls->addWidget(envMaxFreqSpin_);
+    envControls->addStretch();
+
     // --- Plots -----------------------------------------------------------------
     waveformPlot_ = new PlotWidget(tr("Waveform"), tr("ms"), tr("amplitude"));
     waveformPlot_->setAutoScale(/*symmetric=*/true);
@@ -96,34 +132,48 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     spectrogram_ = new SpectrogramWidget;
     spectrogram_->setXMax(maxFreqSpin_->value());
     spectrogram_->setDbRange(kDbFloor, kDbCeiling);
+    envelopePlot_ = new PlotWidget(tr("Envelope spectrum"), tr("Hz"), tr("amplitude"));
+    envelopePlot_->setAutoScale(/*symmetric=*/false);
+    envelopePlot_->setXMax(envMaxFreqSpin_->value());
 
     // --- Metrics ---------------------------------------------------------------
     rmsLabel_ = makeValueLabel();
     peakLabel_ = makeValueLabel();
     crestLabel_ = makeValueLabel();
     domFreqLabel_ = makeValueLabel();
+    envPeakLabel_ = makeValueLabel();
     rateLabel_ = makeValueLabel();
     linkLabel_ = makeValueLabel();
 
     auto* metricsBox = new QGroupBox(tr("Metrics"));
-    auto* metrics = new QHBoxLayout(metricsBox);
-    auto addMetric = [metrics](const QString& name, QLabel* value) {
-        auto* form = new QFormLayout;
-        form->addRow(name, value);
-        metrics->addLayout(form);
+    auto* metrics = new QGridLayout(metricsBox);
+    metrics->setHorizontalSpacing(12);
+    constexpr int kMetricsPerRow = 4;
+    int metricCount = 0;
+    auto addMetric = [metrics, &metricCount](const QString& name, QLabel* value) {
+        const int row = metricCount / kMetricsPerRow;
+        const int col = (metricCount % kMetricsPerRow) * 2;
+        metrics->addWidget(new QLabel(name), row, col);
+        metrics->addWidget(value, row, col + 1);
+        ++metricCount;
     };
     addMetric(tr("RMS"), rmsLabel_);
     addMetric(tr("Peak"), peakLabel_);
     addMetric(tr("Crest factor"), crestLabel_);
     addMetric(tr("Dominant f"), domFreqLabel_);
+    addMetric(tr("Envelope peak"), envPeakLabel_);
     addMetric(tr("Sample rate"), rateLabel_);
     addMetric(tr("Link"), linkLabel_);
-    metrics->addStretch();
+    metrics->setColumnStretch(kMetricsPerRow * 2, 1);
 
     auto* central = new QWidget;
     auto* layout = new QVBoxLayout(central);
     layout->addLayout(controls);
-    layout->addWidget(waveformPlot_, 1);
+    layout->addLayout(envControls);
+    auto* topPlots = new QHBoxLayout;
+    topPlots->addWidget(waveformPlot_, 1);
+    topPlots->addWidget(envelopePlot_, 1);
+    layout->addLayout(topPlots, 1);
     layout->addWidget(spectrumPlot_, 1);
     layout->addWidget(spectrogram_, 1);
     layout->addWidget(metricsBox);
@@ -155,6 +205,8 @@ void MainWindow::startPipeline() {
     cfg.port = static_cast<std::uint16_t>(portSpin_->value());
     cfg.fftSize = static_cast<std::size_t>(fftCombo_->currentData().toInt());
     cfg.hopSize = cfg.fftSize / 4;  // 75 % overlap
+    cfg.envelopeBandLoHz = static_cast<float>(envLoSpin_->value());
+    cfg.envelopeBandHiHz = static_cast<float>(envHiSpin_->value());
 
     try {
         auto pipeline = std::make_unique<sa::Pipeline>(cfg);
@@ -202,6 +254,19 @@ void MainWindow::updateSpectrumScale() {
     }
     if (shownFrame_) {
         showFrame(*shownFrame_);  // redraw with the new scale, also while stopped
+    }
+}
+
+void MainWindow::applyEnvelopeBand() {
+    const double lo = envLoSpin_->value();
+    const double hi = envHiSpin_->value();
+    // Flag an inverted band instead of fighting the user while they type.
+    const bool valid = lo < hi;
+    for (QDoubleSpinBox* spin : {envLoSpin_, envHiSpin_}) {
+        spin->setStyleSheet(valid ? QString() : QStringLiteral("color: #d33;"));
+    }
+    if (valid && pipeline_) {
+        pipeline_->setEnvelopeBand(static_cast<float>(lo), static_cast<float>(hi));
     }
 }
 
@@ -253,10 +318,29 @@ void MainWindow::showFrame(const sa::AnalysisFrame& frame) {
     }
     spectrumPlot_->setData(std::move(spectrum), 0.0, frame.binHz);
 
+    envelopePlot_->setTitle(tr("Envelope spectrum, band %1–%2 Hz")
+                                .arg(frame.envelopeBandLoHz, 0, 'f', 0)
+                                .arg(frame.envelopeBandHiHz, 0, 'f', 0));
+    envelopePlot_->setData(frame.envelopeSpectrum, 0.0, frame.binHz);
+    // Harmonics of a clear envelope line: a fault shows a whole series.
+    const bool clearLine = frame.envelopePeakProminenceDb >= kClearLineDb;
+    std::vector<PlotWidget::Marker> harmonics;
+    if (clearLine) {
+        for (int h = 1; h <= 5; ++h) {
+            harmonics.push_back({h * double(frame.envelopePeakHz), QStringLiteral("%1×").arg(h)});
+        }
+    }
+    envelopePlot_->setMarkers(std::move(harmonics));
+
     rmsLabel_->setText(QString::number(frame.rms, 'f', 4));
     peakLabel_->setText(QString::number(frame.peak, 'f', 4));
     crestLabel_->setText(frame.rms > 0 ? QString::number(frame.peak / frame.rms, 'f', 2)
                                        : QStringLiteral("—"));
     domFreqLabel_->setText(QStringLiteral("%1 Hz").arg(frame.dominantHz, 0, 'f', 2));
+    const QString prominence = QStringLiteral("+%1 dB").arg(frame.envelopePeakProminenceDb, 0, 'f', 0);
+    envPeakLabel_->setText(clearLine ? QStringLiteral("%1 Hz (%2)")
+                                           .arg(frame.envelopePeakHz, 0, 'f', 2)
+                                           .arg(prominence)
+                                     : tr("none (%1)").arg(prominence));
     rateLabel_->setText(QStringLiteral("%1 Hz").arg(frame.sampleRate));
 }

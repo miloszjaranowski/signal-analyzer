@@ -28,6 +28,7 @@ private slots:
     void toggleAcquisition();
     void refresh();
     void updateSpectrumScale();
+    void applyEnvelopeBand();
 
 private:
     void startPipeline();
@@ -44,8 +45,12 @@ private:
     QCheckBox* dbCheck_ = nullptr;
     QDoubleSpinBox* maxFreqSpin_ = nullptr;
     QPushButton* startButton_ = nullptr;
+    QDoubleSpinBox* envLoSpin_ = nullptr;
+    QDoubleSpinBox* envHiSpin_ = nullptr;
+    QDoubleSpinBox* envMaxFreqSpin_ = nullptr;
 
     PlotWidget* waveformPlot_ = nullptr;
+    PlotWidget* envelopePlot_ = nullptr;
     PlotWidget* spectrumPlot_ = nullptr;
     SpectrogramWidget* spectrogram_ = nullptr;
 
@@ -53,6 +58,7 @@ private:
     QLabel* peakLabel_ = nullptr;
     QLabel* crestLabel_ = nullptr;
     QLabel* domFreqLabel_ = nullptr;
+    QLabel* envPeakLabel_ = nullptr;
     QLabel* rateLabel_ = nullptr;
     QLabel* linkLabel_ = nullptr;
 

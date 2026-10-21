@@ -1,7 +1,7 @@
 // Headless front-end: runs the same pipeline as the GUI and prints live metrics.
 // Useful on servers, in CI and for quick checks without Qt.
 //
-//   sa_cli [--port 5005] [--fft 4096] [--seconds 0]
+//   sa_cli [--port 5005] [--fft 4096] [--env-band 1000:4000] [--seconds 0]
 
 #include <chrono>
 #include <cstdio>
@@ -16,10 +16,11 @@
 namespace {
 
 void printUsage() {
-    std::cout << "Usage: sa_cli [--port N] [--fft N] [--seconds N]\n"
-                 "  --port     UDP port to listen on (default 5005)\n"
-                 "  --fft      FFT size, power of two (default 4096)\n"
-                 "  --seconds  stop after N seconds, 0 = run until Ctrl+C (default 0)\n";
+    std::cout << "Usage: sa_cli [--port N] [--fft N] [--env-band LO:HI] [--seconds N]\n"
+                 "  --port      UDP port to listen on (default 5005)\n"
+                 "  --fft       FFT size, power of two (default 4096)\n"
+                 "  --env-band  band-pass for envelope analysis in Hz (default 1000:4000)\n"
+                 "  --seconds   stop after N seconds, 0 = run until Ctrl+C (default 0)\n";
 }
 
 }  // namespace
@@ -36,6 +37,15 @@ int main(int argc, char** argv) {
         } else if (arg == "--fft" && hasValue) {
             config.fftSize = static_cast<std::size_t>(std::stoul(argv[++i]));
             config.hopSize = config.fftSize / 4;
+        } else if (arg == "--env-band" && hasValue) {
+            const std::string band = argv[++i];
+            const auto colon = band.find(':');
+            if (colon == std::string::npos) {
+                printUsage();
+                return EXIT_FAILURE;
+            }
+            config.envelopeBandLoHz = std::stof(band.substr(0, colon));
+            config.envelopeBandHiHz = std::stof(band.substr(colon + 1));
         } else if (arg == "--seconds" && hasValue) {
             seconds = std::stoi(argv[++i]);
         } else {
@@ -57,10 +67,11 @@ int main(int argc, char** argv) {
             const auto stats = pipeline.stats();
             if (const auto frame = pipeline.latestFrame()) {
                 std::printf(
-                    "fs=%u Hz  RMS=%.4f  peak=%.4f  crest=%.2f  f_dom=%.2f Hz  "
+                    "fs=%u Hz  RMS=%.4f  peak=%.4f  crest=%.2f  f_dom=%.2f Hz  f_env=%.2f Hz (%+.0f dB)  "
                     "| pkts=%llu lost=%llu bad=%llu dropped=%llu buf=%zu\n",
                     frame->sampleRate, frame->rms, frame->peak,
                     frame->rms > 0 ? frame->peak / frame->rms : 0.0f, frame->dominantHz,
+                    frame->envelopePeakHz, frame->envelopePeakProminenceDb,
                     static_cast<unsigned long long>(stats.packetsReceived),
                     static_cast<unsigned long long>(stats.packetsLost),
                     static_cast<unsigned long long>(stats.packetsMalformed),

@@ -13,6 +13,16 @@ namespace sa {
 
 using namespace std::chrono_literals;
 
+namespace {
+
+void validateBand(float loHz, float hiHz) {
+    if (!(loHz >= 0.0f && loHz < hiHz)) {
+        throw std::invalid_argument("Envelope band must satisfy 0 <= low < high");
+    }
+}
+
+}  // namespace
+
 Pipeline::Pipeline(PipelineConfig config)
     : config_(config), ring_(config.ringCapacity) {
     if (config_.hopSize == 0 || config_.hopSize > config_.fftSize) {
@@ -22,6 +32,14 @@ Pipeline::Pipeline(PipelineConfig config)
         throw std::invalid_argument("frameHistory must be at least 1");
     }
     SpectrumAnalyzer validate(config_.fftSize);  // throws for a bad FFT size
+    setEnvelopeBand(config_.envelopeBandLoHz, config_.envelopeBandHiHz);
+}
+
+void Pipeline::setEnvelopeBand(float loHz, float hiHz) {
+    validateBand(loHz, hiHz);
+    std::lock_guard lock(bandMutex_);
+    envelopeBandLoHz_ = loHz;
+    envelopeBandHiHz_ = hiHz;
 }
 
 Pipeline::~Pipeline() { stop(); }
@@ -127,6 +145,7 @@ void Pipeline::receiveLoop(std::stop_token stop) {
 
 void Pipeline::dspLoop(std::stop_token stop) {
     SpectrumAnalyzer analyzer(config_.fftSize);
+    EnvelopeAnalyzer envelope(config_.fftSize);
     const std::size_t windowLen = std::max(config_.fftSize, config_.waveformSamples);
 
     std::vector<float> chunk(4096);
@@ -151,6 +170,13 @@ void Pipeline::dspLoop(std::stop_token stop) {
         // Frames end exactly every hopSize samples (a regular STFT), even when one
         // chunk carries several hops' worth of new data. The spectrogram relies on it.
         const std::uint32_t fs = sampleRate_.load(std::memory_order_relaxed);
+        float bandLo = 0.0f;
+        float bandHi = 0.0f;
+        {
+            std::lock_guard lock(bandMutex_);
+            bandLo = envelopeBandLoHz_;
+            bandHi = envelopeBandHiHz_;
+        }
         while (nextFrameEnd <= streamEnd) {
             const auto behind = static_cast<std::size_t>(streamEnd - nextFrameEnd);
             nextFrameEnd += config_.hopSize;
@@ -173,6 +199,18 @@ void Pipeline::dspLoop(std::stop_token stop) {
             frame->rms = rms(fftBlock);
             frame->peak = peakAbs(fftBlock);
             frame->dominantHz = dominantFrequency(frame->spectrum, frame->binHz);
+
+            frame->envelopeSpectrum = envelope.compute(fftBlock, frame->binHz, bandLo, bandHi);
+            frame->envelopeBandLoHz = bandLo;
+            frame->envelopeBandHiHz = bandHi;
+            // The envelope cannot fluctuate faster than the band is wide.
+            const std::size_t envelopeBins =
+                std::min(frame->envelopeSpectrum.size(),
+                         static_cast<std::size_t>((bandHi - bandLo) / frame->binHz) + 1);
+            const auto envelopeRange =
+                std::span<const float>(frame->envelopeSpectrum).first(envelopeBins);
+            frame->envelopePeakHz = dominantFrequency(envelopeRange, frame->binHz);
+            frame->envelopePeakProminenceDb = peakProminenceDb(envelopeRange);
 
             {
                 std::lock_guard lock(frameMutex_);
