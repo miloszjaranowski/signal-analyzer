@@ -86,3 +86,9 @@ TEST(Statistics, RmsAndPeakOfSine) {
     EXPECT_NEAR(sa::rms(x), 3.0f / std::sqrt(2.0f), 1e-3f);
     EXPECT_NEAR(sa::peakAbs(x), 3.0f, 1e-3f);
 }
+
+TEST(Statistics, AmplitudeToDbIsFlooredAtMinus120) {
+    EXPECT_NEAR(sa::amplitudeToDb(1.0f), 0.0f, 1e-5f);
+    EXPECT_NEAR(sa::amplitudeToDb(0.1f), -20.0f, 1e-4f);
+    EXPECT_NEAR(sa::amplitudeToDb(0.0f), -120.0f, 1e-3f);
+}

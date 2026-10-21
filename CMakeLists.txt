@@ -60,8 +60,12 @@ if(SA_BUILD_GUI)
       app/main.cpp
       app/MainWindow.cpp
       app/MainWindow.hpp
+      app/PlotFrame.cpp
+      app/PlotFrame.hpp
       app/PlotWidget.cpp
-      app/PlotWidget.hpp)
+      app/PlotWidget.hpp
+      app/SpectrogramWidget.cpp
+      app/SpectrogramWidget.hpp)
     target_link_libraries(signal_analyzer PRIVATE sa_core sa_options Qt6::Widgets)
     set_target_properties(signal_analyzer PROPERTIES WIN32_EXECUTABLE ON MACOSX_BUNDLE ON)
   else()

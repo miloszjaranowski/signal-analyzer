@@ -7,23 +7,7 @@
 #include <algorithm>
 #include <cmath>
 
-namespace {
-
-constexpr int kLeft = 64;
-constexpr int kRight = 14;
-constexpr int kTop = 26;
-constexpr int kBottom = 30;
-constexpr int kGridDivisions = 5;
-
-QString formatTick(double v) {
-    const double a = std::abs(v);
-    if (a >= 1000.0) return QString::number(v, 'f', 0);
-    if (a >= 10.0) return QString::number(v, 'f', 1);
-    if (a >= 0.1 || a == 0.0) return QString::number(v, 'f', 2);
-    return QString::number(v, 'g', 2);
-}
-
-}  // namespace
+#include "PlotFrame.hpp"
 
 PlotWidget::PlotWidget(QString title, QString xUnit, QString yUnit, QWidget* parent)
     : QWidget(parent), title_(std::move(title)), xUnit_(std::move(xUnit)), yUnit_(std::move(yUnit)) {
@@ -94,7 +78,7 @@ void PlotWidget::paintEvent(QPaintEvent*) {
     const QPalette& pal = palette();
     p.fillRect(rect(), pal.color(QPalette::Base));
 
-    const QRectF area(kLeft, kTop, width() - kLeft - kRight, height() - kTop - kBottom);
+    const QRectF area = plot::dataArea(*this);
     if (area.width() < 10 || area.height() < 10) {
         return;
     }
@@ -110,40 +94,9 @@ void PlotWidget::paintEvent(QPaintEvent*) {
                        area.bottom() - (y - y0) / (y1 - y0) * area.height());
     };
 
-    // Grid and tick labels.
-    QPen gridPen(pal.color(QPalette::Mid));
-    gridPen.setStyle(Qt::DotLine);
-    p.setPen(gridPen);
-    for (int i = 0; i <= kGridDivisions; ++i) {
-        const double fx = area.left() + area.width() * i / kGridDivisions;
-        const double fy = area.top() + area.height() * i / kGridDivisions;
-        p.drawLine(QPointF(fx, area.top()), QPointF(fx, area.bottom()));
-        p.drawLine(QPointF(area.left(), fy), QPointF(area.right(), fy));
-    }
-
-    p.setPen(pal.color(QPalette::Text));
-    const QFontMetrics fm = p.fontMetrics();
-    for (int i = 0; i <= kGridDivisions; ++i) {
-        const double xv = x0 + (x1 - x0) * i / kGridDivisions;
-        const double yv = y1 - (y1 - y0) * i / kGridDivisions;
-        const QString xs = formatTick(xv);
-        const QString ys = formatTick(yv);
-        const double fx = area.left() + area.width() * i / kGridDivisions;
-        const double fy = area.top() + area.height() * i / kGridDivisions;
-        p.drawText(QPointF(fx - fm.horizontalAdvance(xs) / 2.0, area.bottom() + fm.height()), xs);
-        p.drawText(QPointF(area.left() - fm.horizontalAdvance(ys) - 6, fy + fm.ascent() / 2.0), ys);
-    }
-
-    QFont bold = p.font();
-    bold.setBold(true);
-    p.setFont(bold);
-    p.drawText(QPointF(area.left(), kTop - 8), title_);
-    p.setFont(font());
-    const QString units = QStringLiteral("x: %1   y: %2").arg(xUnit_, yUnit_);
-    p.drawText(QPointF(area.right() - fm.horizontalAdvance(units), kTop - 8), units);
-
-    p.setPen(pal.color(QPalette::Mid));
-    p.drawRect(area);
+    plot::drawAxes(p, pal, area,
+                   {.x0 = x0, .x1 = x1, .yBottom = y0, .yTop = y1,
+                    .title = title_, .xUnit = xUnit_, .yUnit = yUnit_});
 
     if (y_.size() < 2) {
         p.setPen(pal.color(QPalette::PlaceholderText));

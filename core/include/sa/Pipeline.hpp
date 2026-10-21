@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <stop_token>
@@ -22,6 +23,7 @@ struct PipelineConfig {
     std::size_t hopSize = 1024;              // new samples between analyses
     std::size_t waveformSamples = 2048;      // samples kept for the time plot
     std::size_t ringCapacity = 1u << 18;     // ~26 s at 10 kHz
+    std::size_t frameHistory = 64;           // recent frames kept for framesSince()
 };
 
 // One analysis result. Immutable once published; shared with the UI by shared_ptr.
@@ -47,11 +49,11 @@ struct PipelineStats {
 
 // Two worker threads connected by a lock-free SPSC ring buffer:
 //
-//   [UDP] -> receive thread -> SpscRingBuffer<float> -> DSP thread -> latest AnalysisFrame
+//   [UDP] -> receive thread -> SpscRingBuffer<float> -> DSP thread -> recent AnalysisFrames
 //
 // The receive thread only parses and copies, so it is never blocked by DSP work.
-// The UI (any thread) polls latestFrame(); the swap is a short mutex-guarded
-// shared_ptr exchange, so readers never see a half-written frame.
+// The UI (any thread) polls latestFrame() or framesSince(); publishing is a short
+// mutex-guarded push of a shared_ptr, so readers never see a half-written frame.
 class Pipeline {
 public:
     explicit Pipeline(PipelineConfig config);
@@ -68,6 +70,9 @@ public:
     const PipelineConfig& config() const { return config_; }
 
     std::shared_ptr<const AnalysisFrame> latestFrame() const;
+    // Frames with index > afterIndex, oldest first (at most config().frameHistory).
+    // Lets a consumer that polls slower than the DSP rate still see every frame.
+    std::vector<std::shared_ptr<const AnalysisFrame>> framesSince(std::uint64_t afterIndex) const;
     PipelineStats stats() const;
     std::string lastError() const;
 
@@ -90,7 +95,7 @@ private:
     std::atomic<std::uint64_t> framesComputed_{0};
 
     mutable std::mutex frameMutex_;
-    std::shared_ptr<const AnalysisFrame> latestFrame_;
+    std::deque<std::shared_ptr<const AnalysisFrame>> recentFrames_;  // newest at back
 
     mutable std::mutex errorMutex_;
     std::string lastError_;

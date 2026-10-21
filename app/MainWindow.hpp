@@ -15,6 +15,7 @@ class QPushButton;
 class QSpinBox;
 class QTimer;
 class PlotWidget;
+class SpectrogramWidget;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -32,9 +33,11 @@ private:
     void startPipeline();
     void stopPipeline();
     void setControlsRunning(bool running);
+    void showFrame(const sa::AnalysisFrame& frame);
 
     std::unique_ptr<sa::Pipeline> pipeline_;
     std::uint64_t lastFrameIndex_ = 0;
+    std::shared_ptr<const sa::AnalysisFrame> shownFrame_;  // redrawn when the scale changes
 
     QSpinBox* portSpin_ = nullptr;
     QComboBox* fftCombo_ = nullptr;
@@ -44,6 +47,7 @@ private:
 
     PlotWidget* waveformPlot_ = nullptr;
     PlotWidget* spectrumPlot_ = nullptr;
+    SpectrogramWidget* spectrogram_ = nullptr;
 
     QLabel* rmsLabel_ = nullptr;
     QLabel* peakLabel_ = nullptr;

@@ -15,11 +15,16 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
-#include <cmath>
 
 #include "PlotWidget.hpp"
+#include "SpectrogramWidget.hpp"
+#include "sa/Dsp.hpp"
 
 namespace {
+
+// Shared by the spectrum plot (in dB mode) and the spectrogram colour scale.
+constexpr double kDbFloor = -100.0;
+constexpr double kDbCeiling = 10.0;
 
 QLabel* makeValueLabel() {
     auto* label = new QLabel(QStringLiteral("—"));
@@ -64,7 +69,10 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     maxFreqSpin_->setSpecialValueText(tr("Nyquist"));
     maxFreqSpin_->setValue(1000.0);
     connect(maxFreqSpin_, &QDoubleSpinBox::valueChanged, this,
-            [this](double v) { spectrumPlot_->setXMax(v); });
+            [this](double v) {
+                spectrumPlot_->setXMax(v);
+                spectrogram_->setXMax(v);
+            });
 
     auto* controls = new QHBoxLayout;
     controls->addWidget(new QLabel(tr("UDP port:")));
@@ -85,6 +93,9 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     waveformPlot_->setAutoScale(/*symmetric=*/true);
     spectrumPlot_ = new PlotWidget(tr("Amplitude spectrum (Hann window)"), tr("Hz"), tr("dB"));
     spectrumPlot_->setXMax(maxFreqSpin_->value());
+    spectrogram_ = new SpectrogramWidget;
+    spectrogram_->setXMax(maxFreqSpin_->value());
+    spectrogram_->setDbRange(kDbFloor, kDbCeiling);
 
     // --- Metrics ---------------------------------------------------------------
     rmsLabel_ = makeValueLabel();
@@ -114,6 +125,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     layout->addLayout(controls);
     layout->addWidget(waveformPlot_, 1);
     layout->addWidget(spectrumPlot_, 1);
+    layout->addWidget(spectrogram_, 1);
     layout->addWidget(metricsBox);
     setCentralWidget(central);
     statusBar()->showMessage(tr("Stopped. Start the Python simulator, then press Start."));
@@ -125,7 +137,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     refreshTimer_->setInterval(33);
     connect(refreshTimer_, &QTimer::timeout, this, &MainWindow::refresh);
 
-    resize(1100, 760);
+    resize(1100, 940);
 }
 
 MainWindow::~MainWindow() { stopPipeline(); }
@@ -154,6 +166,7 @@ void MainWindow::startPipeline() {
     }
 
     lastFrameIndex_ = 0;
+    spectrogram_->clear();
     setControlsRunning(true);
     refreshTimer_->start();
     statusBar()->showMessage(tr("Listening on UDP port %1...").arg(pipeline_->port()));
@@ -182,12 +195,14 @@ void MainWindow::setControlsRunning(bool running) {
 void MainWindow::updateSpectrumScale() {
     if (dbCheck_->isChecked()) {
         spectrumPlot_->setYUnit(tr("dB (re 1)"));
-        spectrumPlot_->setFixedYRange(-100.0, 10.0);
+        spectrumPlot_->setFixedYRange(kDbFloor, kDbCeiling);
     } else {
         spectrumPlot_->setYUnit(tr("amplitude"));
         spectrumPlot_->setAutoScale(/*symmetric=*/false);
     }
-    lastFrameIndex_ = 0;  // force redraw with the new scale
+    if (shownFrame_) {
+        showFrame(*shownFrame_);  // redraw with the new scale, also while stopped
+    }
 }
 
 void MainWindow::refresh() {
@@ -214,27 +229,34 @@ void MainWindow::refresh() {
             .arg(qulonglong(stats.samplesDropped))
             .arg(qulonglong(stats.bufferFill)));
 
-    const auto frame = pipeline_->latestFrame();
-    if (!frame || frame->index == lastFrameIndex_) {
+    const auto frames = pipeline_->framesSince(lastFrameIndex_);
+    if (frames.empty()) {
         return;
     }
-    lastFrameIndex_ = frame->index;
-
-    const double dtMs = 1000.0 / frame->sampleRate;
-    waveformPlot_->setData(frame->waveform, 0.0, dtMs);
-
-    std::vector<float> spectrum = frame->spectrum;
-    if (dbCheck_->isChecked()) {
-        for (float& a : spectrum) {
-            a = 20.0f * std::log10(std::max(a, 1e-6f));
-        }
+    // Every frame becomes a spectrogram row; the other views only need the newest.
+    const double hop = static_cast<double>(pipeline_->config().hopSize);
+    for (const auto& frame : frames) {
+        spectrogram_->addSpectrum(frame->spectrum, frame->binHz, hop / frame->sampleRate);
     }
-    spectrumPlot_->setData(std::move(spectrum), 0.0, frame->binHz);
+    lastFrameIndex_ = frames.back()->index;
+    shownFrame_ = frames.back();
+    showFrame(*shownFrame_);
+}
 
-    rmsLabel_->setText(QString::number(frame->rms, 'f', 4));
-    peakLabel_->setText(QString::number(frame->peak, 'f', 4));
-    crestLabel_->setText(frame->rms > 0 ? QString::number(frame->peak / frame->rms, 'f', 2)
-                                        : QStringLiteral("—"));
-    domFreqLabel_->setText(QStringLiteral("%1 Hz").arg(frame->dominantHz, 0, 'f', 2));
-    rateLabel_->setText(QStringLiteral("%1 Hz").arg(frame->sampleRate));
+void MainWindow::showFrame(const sa::AnalysisFrame& frame) {
+    const double dtMs = 1000.0 / frame.sampleRate;
+    waveformPlot_->setData(frame.waveform, 0.0, dtMs);
+
+    std::vector<float> spectrum = frame.spectrum;
+    if (dbCheck_->isChecked()) {
+        std::transform(spectrum.begin(), spectrum.end(), spectrum.begin(), sa::amplitudeToDb);
+    }
+    spectrumPlot_->setData(std::move(spectrum), 0.0, frame.binHz);
+
+    rmsLabel_->setText(QString::number(frame.rms, 'f', 4));
+    peakLabel_->setText(QString::number(frame.peak, 'f', 4));
+    crestLabel_->setText(frame.rms > 0 ? QString::number(frame.peak / frame.rms, 'f', 2)
+                                       : QStringLiteral("—"));
+    domFreqLabel_->setText(QStringLiteral("%1 Hz").arg(frame.dominantHz, 0, 'f', 2));
+    rateLabel_->setText(QStringLiteral("%1 Hz").arg(frame.sampleRate));
 }

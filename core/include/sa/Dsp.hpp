@@ -17,6 +17,9 @@ std::vector<float> hannWindow(std::size_t size);
 float rms(std::span<const float> x);
 float peakAbs(std::span<const float> x);
 
+// 20*log10(amplitude), floored at -120 dB so silence stays finite.
+float amplitudeToDb(float amplitude);
+
 // Converts a block of samples into a single-sided amplitude spectrum.
 // A sine of amplitude A centred on a bin reads as A in that bin.
 // Buffers are allocated once; compute() does not allocate.

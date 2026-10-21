@@ -70,6 +70,8 @@ float peakAbs(std::span<const float> x) {
     return peak;
 }
 
+float amplitudeToDb(float amplitude) { return 20.0f * std::log10(std::max(amplitude, 1e-6f)); }
+
 SpectrumAnalyzer::SpectrumAnalyzer(std::size_t fftSize)
     : fftSize_(fftSize),
       window_(hannWindow(fftSize)),

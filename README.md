@@ -2,7 +2,7 @@
 
 Real-time vibration signal analyzer: a Python sensor simulator streams samples over UDP,
 a multithreaded C++20 pipeline computes the spectrum and signal metrics, and a Qt 6
-desktop app displays the waveform and FFT live.
+desktop app displays the waveform, FFT and a scrolling spectrogram live.
 
 <!-- TODO: add a GIF of the running app here -->
 
@@ -17,6 +17,8 @@ desktop app displays the waveform and FFT live.
 - **Link diagnostics:** lost packets (sequence gaps), malformed packets, buffer overruns
 - **Cross-platform sockets** (BSD sockets / Winsock) behind a small RAII wrapper
 - **Qt 6 GUI** with a custom `QPainter` plot (min/max decimation per pixel, no QtCharts)
+- **Spectrogram (waterfall)** aligned with the spectrum plot: every analysis frame becomes
+  a row (no frames skipped by the 30 FPS UI), rendered once into a ring of image lines
 - **Headless CLI** (`sa_cli`) running the same pipeline
 - **Tests:** GoogleTest unit + loopback integration tests, run under ThreadSanitizer
   and AddressSanitizer in CI on Linux and Windows
@@ -29,7 +31,7 @@ flowchart LR
     subgraph core["sa_core (C++20, no Qt)"]
         RX["Receive thread<br/>parse + sequence check"] --> RB[("SPSC lock-free<br/>ring buffer")]
         RB --> DSP["DSP thread<br/>Hann + FFT + metrics"]
-        DSP --> FR["latest AnalysisFrame<br/>(shared_ptr swap)"]
+        DSP --> FR["recent AnalysisFrames<br/>(shared_ptr, last 64)"]
     end
     FR --> GUI["Qt GUI<br/>QTimer 30 FPS"]
     FR --> CLI["sa_cli"]
@@ -115,7 +117,7 @@ python simulator/sensor_sim.py --help
 
 ```
 core/      sa_core library: Protocol, SpscRingBuffer, Dsp (FFT), Udp, Pipeline
-app/       Qt 6 GUI: MainWindow, PlotWidget
+app/       Qt 6 GUI: MainWindow, PlotWidget, SpectrogramWidget, PlotFrame (shared axes)
 cli/       headless front-end
 tests/     GoogleTest unit and integration tests
 simulator/ Python UDP sensor simulator
@@ -123,7 +125,7 @@ simulator/ Python UDP sensor simulator
 
 ## Roadmap
 
-- [ ] Spectrogram (waterfall) view
+- [x] Spectrogram (waterfall) view
 - [ ] Envelope analysis for bearing fault frequencies
 - [ ] Rainflow cycle counting and fatigue damage estimate (Miner's rule)
 - [ ] Multi-channel streams

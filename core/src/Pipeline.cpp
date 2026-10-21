@@ -18,6 +18,9 @@ Pipeline::Pipeline(PipelineConfig config)
     if (config_.hopSize == 0 || config_.hopSize > config_.fftSize) {
         throw std::invalid_argument("hopSize must be in (0, fftSize]");
     }
+    if (config_.frameHistory == 0) {
+        throw std::invalid_argument("frameHistory must be at least 1");
+    }
     SpectrumAnalyzer validate(config_.fftSize);  // throws for a bad FFT size
 }
 
@@ -49,7 +52,15 @@ std::uint16_t Pipeline::port() const { return receiver_ ? receiver_->port() : co
 
 std::shared_ptr<const AnalysisFrame> Pipeline::latestFrame() const {
     std::lock_guard lock(frameMutex_);
-    return latestFrame_;
+    return recentFrames_.empty() ? nullptr : recentFrames_.back();
+}
+
+std::vector<std::shared_ptr<const AnalysisFrame>> Pipeline::framesSince(
+    std::uint64_t afterIndex) const {
+    std::lock_guard lock(frameMutex_);
+    const auto first = std::find_if(recentFrames_.begin(), recentFrames_.end(),
+                                    [afterIndex](const auto& f) { return f->index > afterIndex; });
+    return {first, recentFrames_.end()};
 }
 
 PipelineStats Pipeline::stats() const {
@@ -119,9 +130,10 @@ void Pipeline::dspLoop(std::stop_token stop) {
     const std::size_t windowLen = std::max(config_.fftSize, config_.waveformSamples);
 
     std::vector<float> chunk(4096);
-    std::vector<float> history;
+    std::vector<float> history;  // the last history.size() samples of the stream
     history.reserve(windowLen * 2 + chunk.size());
-    std::size_t newSamples = 0;
+    std::uint64_t streamEnd = 0;                   // samples received so far
+    std::uint64_t nextFrameEnd = config_.fftSize;  // stream position where the next frame ends
     std::uint64_t frameIndex = 0;
 
     while (!stop.stop_requested()) {
@@ -134,38 +146,49 @@ void Pipeline::dspLoop(std::stop_token stop) {
         }
 
         history.insert(history.end(), chunk.begin(), chunk.begin() + static_cast<std::ptrdiff_t>(n));
-        newSamples += n;
+        streamEnd += n;
+
+        // Frames end exactly every hopSize samples (a regular STFT), even when one
+        // chunk carries several hops' worth of new data. The spectrogram relies on it.
+        const std::uint32_t fs = sampleRate_.load(std::memory_order_relaxed);
+        while (nextFrameEnd <= streamEnd) {
+            const auto behind = static_cast<std::size_t>(streamEnd - nextFrameEnd);
+            nextFrameEnd += config_.hopSize;
+            if (fs == 0 || behind + config_.fftSize > history.size()) {
+                continue;
+            }
+            const std::size_t end = history.size() - behind;
+
+            const std::span<const float> fftBlock(history.data() + end - config_.fftSize,
+                                                  config_.fftSize);
+            const std::size_t waveLen = std::min(config_.waveformSamples, end);
+            const std::span<const float> waveBlock(history.data() + end - waveLen, waveLen);
+
+            auto frame = std::make_shared<AnalysisFrame>();
+            frame->index = ++frameIndex;
+            frame->sampleRate = fs;
+            frame->binHz = static_cast<float>(fs) / static_cast<float>(config_.fftSize);
+            frame->spectrum = analyzer.compute(fftBlock);
+            frame->waveform.assign(waveBlock.begin(), waveBlock.end());
+            frame->rms = rms(fftBlock);
+            frame->peak = peakAbs(fftBlock);
+            frame->dominantHz = dominantFrequency(frame->spectrum, frame->binHz);
+
+            {
+                std::lock_guard lock(frameMutex_);
+                recentFrames_.push_back(std::move(frame));
+                if (recentFrames_.size() > config_.frameHistory) {
+                    recentFrames_.pop_front();
+                }
+            }
+            ++framesComputed_;
+        }
+
+        // Trim only after analysis: the frames above may have needed older samples.
         if (history.size() > 2 * windowLen) {
             history.erase(history.begin(),
                           history.end() - static_cast<std::ptrdiff_t>(windowLen));
         }
-
-        const std::uint32_t fs = sampleRate_.load(std::memory_order_relaxed);
-        if (history.size() < config_.fftSize || newSamples < config_.hopSize || fs == 0) {
-            continue;
-        }
-        newSamples = 0;
-
-        const std::span<const float> fftBlock(history.data() + history.size() - config_.fftSize,
-                                              config_.fftSize);
-        const std::size_t waveLen = std::min(config_.waveformSamples, history.size());
-        const std::span<const float> waveBlock(history.data() + history.size() - waveLen, waveLen);
-
-        auto frame = std::make_shared<AnalysisFrame>();
-        frame->index = ++frameIndex;
-        frame->sampleRate = fs;
-        frame->binHz = static_cast<float>(fs) / static_cast<float>(config_.fftSize);
-        frame->spectrum = analyzer.compute(fftBlock);
-        frame->waveform.assign(waveBlock.begin(), waveBlock.end());
-        frame->rms = rms(fftBlock);
-        frame->peak = peakAbs(fftBlock);
-        frame->dominantHz = dominantFrequency(frame->spectrum, frame->binHz);
-
-        {
-            std::lock_guard lock(frameMutex_);
-            latestFrame_ = std::move(frame);
-        }
-        ++framesComputed_;
     }
 }
 
