@@ -130,6 +130,16 @@ TEST(EnvelopeAnalyzer, RecoversModulationOfBandLimitedCarrier) {
     EXPECT_NEAR(sa::dominantFrequency(env, float(kEnvBinHz)), fm, 0.5);
 }
 
+// A strong tone below the band, off-bin and noise-free. Without windowing before
+// the band-pass, its leakage into the band produced a false low-frequency
+// envelope line (+50..70 dB above the rest).
+TEST(EnvelopeAnalyzer, StrongToneBelowBandDoesNotLeakIn) {
+    const auto x = sine(kEnvN, 50.0, kEnvFs, 3.0);
+    sa::EnvelopeAnalyzer analyzer(kEnvN);
+    const auto& env = analyzer.compute(x, float(kEnvBinHz), 1000.0f, 4000.0f);
+    EXPECT_LT(*std::max_element(env.begin() + 2, env.end()), 1e-5f);
+}
+
 TEST(EnvelopeAnalyzer, BandWithoutContentGivesFlatEnvelope) {
     const auto x = sine(kEnvN, 1024 * kEnvBinHz, kEnvFs, 1.0);
     sa::EnvelopeAnalyzer analyzer(kEnvN);

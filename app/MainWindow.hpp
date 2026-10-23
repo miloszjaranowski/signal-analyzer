@@ -15,6 +15,7 @@ class QPushButton;
 class QSpinBox;
 class QTimer;
 class BearingPanel;
+class FatiguePanel;
 class PlotWidget;
 class SpectrogramWidget;
 
@@ -55,6 +56,7 @@ private:
     PlotWidget* spectrumPlot_ = nullptr;
     SpectrogramWidget* spectrogram_ = nullptr;
     BearingPanel* bearingPanel_ = nullptr;
+    FatiguePanel* fatiguePanel_ = nullptr;
 
     QLabel* rmsLabel_ = nullptr;
     QLabel* peakLabel_ = nullptr;

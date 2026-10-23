@@ -38,6 +38,7 @@ add_library(sa_core
   core/src/Bearing.cpp
   core/src/Protocol.cpp
   core/src/Dsp.cpp
+  core/src/Fatigue.cpp
   core/src/Udp.cpp
   core/src/Pipeline.cpp)
 target_include_directories(sa_core PUBLIC core/include)
@@ -61,6 +62,8 @@ if(SA_BUILD_GUI)
       app/main.cpp
       app/BearingPanel.cpp
       app/BearingPanel.hpp
+      app/FatiguePanel.cpp
+      app/FatiguePanel.hpp
       app/MainWindow.cpp
       app/MainWindow.hpp
       app/PlotFrame.cpp
@@ -97,6 +100,7 @@ if(SA_BUILD_TESTS)
   enable_testing()
   add_executable(sa_tests
     tests/test_bearing.cpp
+    tests/test_fatigue.cpp
     tests/test_ring_buffer.cpp
     tests/test_dsp.cpp
     tests/test_protocol_pipeline.cpp)

@@ -18,6 +18,7 @@
 #include <algorithm>
 
 #include "BearingPanel.hpp"
+#include "FatiguePanel.hpp"
 #include "PlotWidget.hpp"
 #include "SpectrogramWidget.hpp"
 #include "sa/Bearing.hpp"
@@ -181,17 +182,32 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     setCentralWidget(central);
     statusBar()->showMessage(tr("Stopped. Start the Python simulator, then press Start."));
 
-    // --- Bearing defect frequencies (side panel) --------------------------------
-    bearingPanel_ = new BearingPanel;
-    connect(bearingPanel_, &BearingPanel::changed, this, [this] {
+    // --- Side panels: bearing defect frequencies and fatigue, as tabs ----------
+    const auto redraw = [this] {
         if (shownFrame_) {
             showFrame(*shownFrame_);
         }
+    };
+    auto addPanel = [this](const QString& title, QWidget* panel) {
+        auto* dock = new QDockWidget(title, this);
+        dock->setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable);
+        dock->setWidget(panel);
+        addDockWidget(Qt::RightDockWidgetArea, dock);
+        return dock;
+    };
+
+    bearingPanel_ = new BearingPanel;
+    connect(bearingPanel_, &BearingPanel::changed, this, redraw);
+    fatiguePanel_ = new FatiguePanel;
+    connect(fatiguePanel_, &FatiguePanel::changed, this, redraw);
+    connect(fatiguePanel_, &FatiguePanel::resetRequested, this, [this] {
+        if (pipeline_) {
+            pipeline_->resetFatigue();
+        }
     });
-    auto* bearingDock = new QDockWidget(tr("Bearing"), this);
-    bearingDock->setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable);
-    bearingDock->setWidget(bearingPanel_);
-    addDockWidget(Qt::RightDockWidgetArea, bearingDock);
+    QDockWidget* bearingDock = addPanel(tr("Bearing"), bearingPanel_);
+    tabifyDockWidget(bearingDock, addPanel(tr("Fatigue"), fatiguePanel_));
+    bearingDock->raise();
 
     updateSpectrumScale();
 
@@ -378,5 +394,7 @@ void MainWindow::showFrame(const sa::AnalysisFrame& frame) {
         }
     }
     bearingLabel_->setText(diagnosis);
+
+    fatiguePanel_->showFrame(frame);
     rateLabel_->setText(QStringLiteral("%1 Hz").arg(frame.sampleRate));
 }

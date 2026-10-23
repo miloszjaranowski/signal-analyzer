@@ -2,7 +2,8 @@
 // Useful on servers, in CI and for quick checks without Qt.
 //
 //   sa_cli [--port 5005] [--fft 4096] [--env-band 1000:4000]
-//          [--rpm 3000 [--bearing 9:7.94:39.04:0]] [--seconds 0]
+//          [--rpm 3000 [--bearing 9:7.94:39.04:0]] [--stress-scale 1] [--sn 3:90:2e6]
+//          [--seconds 0]
 
 #include <chrono>
 #include <cstdio>
@@ -24,13 +25,16 @@ namespace {
 
 void printUsage() {
     std::cout << "Usage: sa_cli [--port N] [--fft N] [--env-band LO:HI] [--rpm R [--bearing N:d:D[:angle]]]\n"
-                 "              [--seconds N]\n"
+                 "              [--stress-scale K] [--sn m:RANGE:CYCLES] [--seconds N]\n"
                  "  --port      UDP port to listen on (default 5005)\n"
                  "  --fft       FFT size, power of two (default 4096)\n"
                  "  --env-band  band-pass for envelope analysis in Hz (default 1000:4000)\n"
                  "  --rpm       shaft speed; enables matching envelope lines to bearing defects\n"
                  "  --bearing   rolling elements : ball diameter : pitch diameter [: contact angle deg]\n"
                  "              (default 9:7.94:39.04:0, SKF 6205)\n"
+                 "  --stress-scale  stress per signal unit for fatigue, e.g. MPa/g (default 1)\n"
+                 "  --sn        Basquin S-N curve: slope : stress range : cycles at that range\n"
+                 "              (default 3:90:2e6)\n"
                  "  --seconds   stop after N seconds, 0 = run until Ctrl+C (default 0)\n";
 }
 
@@ -65,6 +69,8 @@ int main(int argc, char** argv) {
     sa::PipelineConfig config;
     sa::BearingGeometry geometry;
     std::optional<double> rpm;
+    sa::SnCurve snCurve;
+    double stressScale = 1.0;
     int seconds = 0;
 
     try {
@@ -94,6 +100,14 @@ int main(int argc, char** argv) {
                 geometry.ballDiameter = values[1];
                 geometry.pitchDiameter = values[2];
                 geometry.contactAngleDeg = values.size() == 4 ? values[3] : 0.0;
+            } else if (arg == "--stress-scale" && hasValue) {
+                stressScale = std::stod(argv[++i]);
+            } else if (arg == "--sn" && hasValue) {
+                const auto values = splitNumbers(argv[++i]);
+                if (values.size() != 3) {
+                    throw std::invalid_argument("--sn expects m:RANGE:CYCLES");
+                }
+                snCurve = {values[0], values[1], values[2]};
             } else if (arg == "--seconds" && hasValue) {
                 seconds = std::stoi(argv[++i]);
             } else {
@@ -131,12 +145,16 @@ int main(int argc, char** argv) {
             const auto stats = pipeline.stats();
             if (const auto frame = pipeline.latestFrame()) {
                 const std::string match = bearing ? describeMatch(*frame, *bearing) + "  " : "";
+                const double damage = sa::minerDamage(frame->rainflow, snCurve, stressScale);
+                const std::string life =
+                    damage > 0.0 ? sa::formatDuration(frame->fatigueSeconds / damage) : "-";
                 std::printf(
                     "fs=%u Hz  RMS=%.4f  peak=%.4f  crest=%.2f  f_dom=%.2f Hz  f_env=%.2f Hz (%+.0f dB)  "
-                    "%s| pkts=%llu lost=%llu bad=%llu dropped=%llu buf=%zu\n",
+                    "%sD=%.3g life=%s  | pkts=%llu lost=%llu bad=%llu dropped=%llu buf=%zu\n",
                     frame->sampleRate, frame->rms, frame->peak,
                     frame->rms > 0 ? frame->peak / frame->rms : 0.0f, frame->dominantHz,
-                    frame->envelopePeakHz, frame->envelopePeakProminenceDb, match.c_str(),
+                    frame->envelopePeakHz, frame->envelopePeakProminenceDb, match.c_str(), damage,
+                    life.c_str(),
                     static_cast<unsigned long long>(stats.packetsReceived),
                     static_cast<unsigned long long>(stats.packetsLost),
                     static_cast<unsigned long long>(stats.packetsMalformed),

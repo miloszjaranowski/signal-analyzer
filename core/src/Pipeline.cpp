@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <optional>
 #include <span>
 #include <stdexcept>
 
@@ -155,6 +156,13 @@ void Pipeline::dspLoop(std::stop_token stop) {
     std::uint64_t nextFrameEnd = config_.fftSize;  // stream position where the next frame ends
     std::uint64_t frameIndex = 0;
 
+    RainflowCounter rainflow;
+    RangeHistogram closedCycles;
+    double fatigueSeconds = 0.0;
+    const RainflowCounter::CycleSink countCycle = [&closedCycles](const RainflowCycle& c) {
+        closedCycles.add(c.range, c.count);
+    };
+
     while (!stop.stop_requested()) {
         const std::size_t n = ring_.pop(chunk);
         if (n == 0) {
@@ -177,6 +185,20 @@ void Pipeline::dspLoop(std::stop_token stop) {
             bandLo = envelopeBandLoHz_;
             bandHi = envelopeBandHiHz_;
         }
+
+        // Fatigue needs every sample, not just the analysed windows.
+        if (fatigueResetRequested_.exchange(false)) {
+            rainflow.reset();
+            closedCycles.clear();
+            fatigueSeconds = 0.0;
+        }
+        rainflow.push(std::span<const float>(chunk.data(), n), countCycle);
+        if (fs != 0) {
+            fatigueSeconds += static_cast<double>(n) / fs;
+        }
+        // Built at most once per chunk; frames from the same chunk share it.
+        std::optional<RangeHistogram> fatigueSnapshot;
+
         while (nextFrameEnd <= streamEnd) {
             const auto behind = static_cast<std::size_t>(streamEnd - nextFrameEnd);
             nextFrameEnd += config_.hopSize;
@@ -207,10 +229,23 @@ void Pipeline::dspLoop(std::stop_token stop) {
             const std::size_t envelopeBins =
                 std::min(frame->envelopeSpectrum.size(),
                          static_cast<std::size_t>((bandHi - bandLo) / frame->binHz) + 1);
+            // Bins 0 and 1 are the Hann main lobe around DC: any slow drift of the
+            // envelope (block edges, level changes) lands there. Searching from bin 2
+            // keeps that from posing as a line; both helpers skip their first bin.
             const auto envelopeRange =
-                std::span<const float>(frame->envelopeSpectrum).first(envelopeBins);
-            frame->envelopePeakHz = dominantFrequency(envelopeRange, frame->binHz);
+                std::span<const float>(frame->envelopeSpectrum).first(envelopeBins).subspan(1);
+            const float peakHz = dominantFrequency(envelopeRange, frame->binHz);
+            frame->envelopePeakHz = peakHz > 0.0f ? peakHz + frame->binHz : 0.0f;
             frame->envelopePeakProminenceDb = peakProminenceDb(envelopeRange);
+
+            if (!fatigueSnapshot) {
+                fatigueSnapshot = closedCycles;
+                for (const RainflowCycle& c : rainflow.residue()) {
+                    fatigueSnapshot->add(c.range, c.count);
+                }
+            }
+            frame->rainflow = *fatigueSnapshot;
+            frame->fatigueSeconds = fatigueSeconds;
 
             {
                 std::lock_guard lock(frameMutex_);

@@ -105,6 +105,20 @@ const std::vector<float>& SpectrumAnalyzer::compute(std::span<const float> block
     for (std::size_t i = 0; i < fftSize_; ++i) {
         work_[i] = {block[i] * window_[i], 0.0f};
     }
+    return transform();
+}
+
+const std::vector<float>& SpectrumAnalyzer::computeWindowed(std::span<const float> windowed) {
+    if (windowed.size() != fftSize_) {
+        throw std::invalid_argument("Block size must equal FFT size");
+    }
+    for (std::size_t i = 0; i < fftSize_; ++i) {
+        work_[i] = {windowed[i], 0.0f};
+    }
+    return transform();
+}
+
+const std::vector<float>& SpectrumAnalyzer::transform() {
     fftInPlace(work_);
 
     const std::size_t bins = spectrum_.size();
@@ -130,8 +144,9 @@ const std::vector<float>& EnvelopeAnalyzer::compute(std::span<const float> block
     if (!(binHz > 0.0f)) {
         throw std::invalid_argument("binHz must be positive");
     }
+    const std::vector<float>& w = spectrum_.window();
     for (std::size_t i = 0; i < n; ++i) {
-        work_[i] = {block[i], 0.0f};
+        work_[i] = {block[i] * w[i], 0.0f};
     }
     fftInPlace(work_);
 
@@ -146,17 +161,20 @@ const std::vector<float>& EnvelopeAnalyzer::compute(std::span<const float> block
     }
     inverseFftInPlace(work_);
 
-    // Remove the mean (the overall level in the band); only its fluctuation matters.
+    // The magnitude is the envelope A(t) times the window. Removing the window-weighted
+    // mean leaves (A - mean A) * window: exactly what the spectrum needs, windowed once.
     double sum = 0.0;
+    double windowSum = 0.0;
     for (std::size_t i = 0; i < n; ++i) {
         envelope_[i] = std::abs(work_[i]);
         sum += envelope_[i];
+        windowSum += w[i];
     }
-    const auto mean = static_cast<float>(sum / static_cast<double>(n));
-    for (float& e : envelope_) {
-        e -= mean;
+    const auto mean = static_cast<float>(sum / windowSum);
+    for (std::size_t i = 0; i < n; ++i) {
+        envelope_[i] -= mean * w[i];
     }
-    return spectrum_.compute(envelope_);
+    return spectrum_.computeWindowed(envelope_);
 }
 
 float dominantFrequency(std::span<const float> spectrum, float binHz) {

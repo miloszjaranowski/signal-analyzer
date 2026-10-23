@@ -11,6 +11,7 @@
 #include <thread>
 #include <vector>
 
+#include "sa/Fatigue.hpp"
 #include "sa/SpscRingBuffer.hpp"
 
 namespace sa {
@@ -44,6 +45,11 @@ struct AnalysisFrame {
     float envelopeBandHiHz = 0.0f;
     float envelopePeakHz = 0.0f;          // strongest envelope component, e.g. a fault rate
     float envelopePeakProminenceDb = 0.0f;  // how far it stands above the envelope noise
+
+    // Rainflow cycles of every sample since start (or resetFatigue()), including
+    // the current residue as half cycles, and the signal time they cover.
+    RangeHistogram rainflow;
+    double fatigueSeconds = 0.0;
 };
 
 struct PipelineStats {
@@ -81,6 +87,9 @@ public:
     // unless 0 <= loHz < hiHz.
     void setEnvelopeBand(float loHz, float hiHz);
 
+    // Thread-safe; restarts rainflow counting from the next chunk of samples.
+    void resetFatigue() { fatigueResetRequested_ = true; }
+
     std::shared_ptr<const AnalysisFrame> latestFrame() const;
     // Frames with index > afterIndex, oldest first (at most config().frameHistory).
     // Lets a consumer that polls slower than the DSP rate still see every frame.
@@ -99,6 +108,7 @@ private:
 
     std::atomic<bool> running_{false};
     std::atomic<std::uint32_t> sampleRate_{0};
+    std::atomic<bool> fatigueResetRequested_{false};
 
     std::atomic<std::uint64_t> packetsReceived_{0};
     std::atomic<std::uint64_t> packetsLost_{0};

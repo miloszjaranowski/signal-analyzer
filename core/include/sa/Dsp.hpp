@@ -32,10 +32,15 @@ public:
 
     // `block` must contain exactly fftSize() samples. Returns fftSize()/2 + 1 bins.
     const std::vector<float>& compute(std::span<const float> block);
+    // Same, for a block that has already been multiplied by window().
+    const std::vector<float>& computeWindowed(std::span<const float> windowed);
 
     std::size_t fftSize() const { return fftSize_; }
+    const std::vector<float>& window() const { return window_; }
 
 private:
+    const std::vector<float>& transform();  // FFT of work_ -> scaled spectrum_
+
     std::size_t fftSize_;
     std::vector<float> window_;
     float amplitudeScale_;
@@ -48,8 +53,10 @@ private:
 // spectrum of the envelope. Repetitive impacts, e.g. rolling elements hitting a
 // spall, show up as a peak at their repetition rate and its harmonics even when
 // they are buried in the raw spectrum. Band-pass and Hilbert transform are done
-// together in the frequency domain. Buffers are allocated once; compute() does
-// not allocate.
+// together in the frequency domain, on the Hann-windowed block: without the window,
+// strong tones below the band would leak into it and their block-edge
+// discontinuity would show up as false low-frequency envelope lines. Buffers are
+// allocated once; compute() does not allocate.
 class EnvelopeAnalyzer {
 public:
     explicit EnvelopeAnalyzer(std::size_t fftSize);

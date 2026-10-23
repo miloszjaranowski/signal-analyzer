@@ -19,6 +19,9 @@ desktop app displays the waveform, FFT and a scrolling spectrogram live.
 - **Bearing defect frequencies** (FTF, BPFO, BPFI, BSF) from geometry and shaft speed,
   verified against the CWRU 6205 reference; the envelope peak is matched to the closest
   defect harmonic ("BPFO 1× (outer race), −1.0 %")
+- **Fatigue:** streaming rainflow counting (ASTM E1049, checked against its worked
+  example) of every sample, Palmgren-Miner damage on a Basquin S-N curve, damage rate
+  and estimated life, damage share per stress range
 - **Metrics:** RMS, peak, crest factor, dominant frequency, envelope peak, bearing diagnosis
 - **Link diagnostics:** lost packets (sequence gaps), malformed packets, buffer overruns
 - **Cross-platform sockets** (BSD sockets / Winsock) behind a small RAII wrapper
@@ -36,7 +39,7 @@ flowchart LR
     SIM["Python simulator<br/>sensor_sim.py"] -- "UDP, SAP1 packets" --> RX
     subgraph core["sa_core (C++20, no Qt)"]
         RX["Receive thread<br/>parse + sequence check"] --> RB[("SPSC lock-free<br/>ring buffer")]
-        RB --> DSP["DSP thread<br/>Hann + FFT + envelope + metrics"]
+        RB --> DSP["DSP thread<br/>Hann + FFT + envelope + rainflow + metrics"]
         DSP --> FR["recent AnalysisFrames<br/>(shared_ptr, last 64)"]
     end
     FR --> GUI["Qt GUI<br/>QTimer 30 FPS"]
@@ -173,11 +176,49 @@ python simulator/sensor_sim.py --fault-hz 177.5 --fault-amp 0.3
 ./build/sa_cli --rpm 3000     # ... match=BPFO 1x (-1.0%)
 ```
 
+### Fatigue: rainflow counting and Miner's rule
+
+Every sample (not only the analysed FFT windows) goes through a streaming **rainflow**
+counter, the four-point variant of ASTM E1049-85: only reversals are kept, a cycle closes
+when its range is enclosed by both neighbouring ranges, and what is left open (the
+residue) counts as half cycles. Feeding the history in chunks gives exactly the same
+cycles as counting it in one piece; the unit tests check this and the standard's worked
+example.
+
+Closed cycles go into a range histogram that widens automatically to the largest range
+seen. Each bin keeps the sum of its ranges, so damage uses the true mean range per bin,
+not the bin centre. Damage is the **Palmgren-Miner** sum `D = Σ nᵢ / Nᵢ` on a **Basquin**
+S-N curve `N = N_ref · (Δσ_ref / Δσ)^m` (default: m = 3, 2·10⁶ cycles at 90 MPa, the form
+of welded steel detail categories in Eurocode 3 and IIW). D = 1 is the predicted end of
+life; the estimated life is the signal time divided by D, assuming the load stays the
+same. There is no endurance limit and no mean-stress correction yet, so the estimate is
+conservative.
+
+Because damage is computed from the histogram outside the DSP thread, the calibration
+and the S-N curve can change while running without recounting. **Reset counting** (GUI)
+starts over.
+
+The simulator produces acceleration, not stress. Fatigue needs stress, so the
+**stress scale** (MPa per signal unit, e.g. from a strain gauge or an FE transfer
+function) converts it. Without a real calibration D is a relative damage, useful for
+comparing load conditions but not as an absolute life.
+
+A case you can check by hand: a pure 50 Hz sine of amplitude 1 at 50 MPa per unit is
+50 cycles/s of 100 MPa range. With 2·10⁶ cycles at 100 MPa the life is
+2·10⁶ / 50 s = 11.1 h:
+
+```bash
+python simulator/sensor_sim.py --tones 50:1 --noise 0
+./build/sa_cli --stress-scale 50 --sn 3:100:2e6   # ... life=11.1 h
+```
+
 ## Project layout
 
 ```
-core/      sa_core library: Protocol, SpscRingBuffer, Dsp (FFT, envelope), Bearing, Udp, Pipeline
-app/       Qt 6 GUI: MainWindow, PlotWidget, SpectrogramWidget, BearingPanel, PlotFrame (shared axes)
+core/      sa_core library: Protocol, SpscRingBuffer, Dsp (FFT, envelope), Bearing, Fatigue,
+           Udp, Pipeline
+app/       Qt 6 GUI: MainWindow, PlotWidget, SpectrogramWidget, BearingPanel, FatiguePanel,
+           PlotFrame (shared axes)
 cli/       headless front-end
 tests/     GoogleTest unit and integration tests
 simulator/ Python UDP sensor simulator
@@ -188,7 +229,8 @@ simulator/ Python UDP sensor simulator
 - [x] Spectrogram (waterfall) view
 - [x] Envelope analysis for bearing fault frequencies
 - [x] Bearing fault frequency calculator (BPFO/BPFI/BSF/FTF from geometry and shaft speed)
-- [ ] Rainflow cycle counting and fatigue damage estimate (Miner's rule)
+- [x] Rainflow cycle counting and fatigue damage estimate (Miner's rule)
+- [ ] Fatigue refinements: endurance limit / two-slope S-N curve, mean-stress correction
 - [ ] Multi-channel streams
 - [ ] Recording to file / replay (CSV, HDF5)
 - [ ] ESP32 + MEMS accelerometer as a real sensor

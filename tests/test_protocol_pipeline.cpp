@@ -113,6 +113,12 @@ TEST(Pipeline, AnalysesSineAndCountsLostPackets) {
     EXPECT_NEAR(frame->dominantHz, kFreq, 1.0);
     EXPECT_NEAR(frame->rms, 1.0 / std::sqrt(2.0), 0.02);
     EXPECT_TRUE(pipeline.lastError().empty());
+
+    // Rainflow sees every received sample: 38 * 256 samples = 1.216 s of a unit
+    // sine at 437.5 Hz, i.e. ~532 cycles of range ~2 (peaks fall between samples).
+    EXPECT_NEAR(frame->fatigueSeconds, 38.0 * kBlock / kFs, 1e-9);
+    EXPECT_NEAR(frame->rainflow.totalCycles(), 38.0 * kBlock / kFs * kFreq, 5.0);
+    EXPECT_NEAR(frame->rainflow.maxRange(), 2.0, 0.05);
 }
 
 TEST(Pipeline, RejectsInvalidEnvelopeBand) {
