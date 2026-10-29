@@ -46,9 +46,9 @@ struct AnalysisFrame {
     float envelopePeakHz = 0.0f;          // strongest envelope component, e.g. a fault rate
     float envelopePeakProminenceDb = 0.0f;  // how far it stands above the envelope noise
 
-    // Rainflow cycles of every sample since start (or resetFatigue()), including
-    // the current residue as half cycles, and the signal time they cover.
-    RangeHistogram rainflow;
+    // Rainflow matrix of every sample since start (or resetFatigue()), including
+    // the current residue as half cycles, and the signal time it covers.
+    RainflowMatrix rainflow;
     double fatigueSeconds = 0.0;
 };
 

@@ -43,47 +43,99 @@ private:
 // Offline counting of a whole history: full cycles followed by the residue.
 std::vector<RainflowCycle> rainflowCycles(std::span<const float> history);
 
-// Cycle counts over stress range with a fixed number of equal-width bins that
-// widen (by merging pairs) as larger ranges arrive, so it adapts to any signal
-// scale. Each bin also keeps the sum of its ranges, so damage can use the exact
-// mean range per bin instead of the bin centre.
-class RangeHistogram {
+// Rainflow matrix: cycle counts over range x mean, with a fixed number of
+// equal-width bins on each axis that widen (by merging pairs) as larger values
+// arrive, so it adapts to any signal scale. The mean axis is symmetric around 0.
+// Each cell also keeps the sums of its ranges and means, so damage uses the exact
+// averages per cell instead of bin centres.
+class RainflowMatrix {
 public:
-    explicit RangeHistogram(std::size_t bins = 128);
+    struct Cell {
+        double count = 0.0;
+        double rangeSum = 0.0;  // sum of range * count
+        double meanSum = 0.0;   // sum of mean * count
+    };
 
-    void add(double range, double count);
+    explicit RainflowMatrix(std::size_t rangeBins = 64, std::size_t meanBins = 32);
+
+    void add(double range, double mean, double count);
     void clear();
 
-    double binWidth() const { return binWidth_; }  // bin i covers [i, i+1) * binWidth
-    const std::vector<double>& counts() const { return counts_; }
-    double meanRange(std::size_t bin) const;
+    std::size_t rangeBins() const { return rangeBins_; }
+    std::size_t meanBins() const { return meanBins_; }
+    // Range bin r covers [r, r+1) * rangeBinWidth; mean bin m covers
+    // [m - meanBins/2, m - meanBins/2 + 1) * meanBinWidth.
+    double rangeBinWidth() const { return rangeWidth_; }
+    double meanBinWidth() const { return meanWidth_; }
+    const Cell& cell(std::size_t rangeBin, std::size_t meanBin) const {
+        return cells_[rangeBin * meanBins_ + meanBin];
+    }
+
     double totalCycles() const;
     double maxRange() const { return maxRange_; }
 
 private:
-    std::vector<double> counts_;
-    std::vector<double> rangeSums_;  // sum of range * count per bin
-    double binWidth_ = 0.0;          // 0 until the first non-zero range
+    void widenRange();
+    void widenMean();
+    Cell& at(std::size_t rangeBin, std::size_t meanBin) { return cells_[rangeBin * meanBins_ + meanBin]; }
+
+    std::size_t rangeBins_;
+    std::size_t meanBins_;
+    std::vector<Cell> cells_;  // row-major: range bin, then mean bin
+    double rangeWidth_ = 0.0;  // 0 until the first non-zero range
+    double meanWidth_ = 0.0;   // 0 until the first non-zero mean
     double maxRange_ = 0.0;
 };
 
-// Basquin S-N curve: a stress range S survives N = refCycles * (refRange / S)^slope cycles.
-// Defaults: slope 3 with 2e6 cycles at the reference range, the usual form of
-// detail categories for welded steel (Eurocode 3, IIW); refRange is the detail
-// category in the same unit as the stress ranges.
+// S-N curve: how many cycles of a stress range S a detail survives.
+//   SingleSlope:    N = refCycles * (refRange / S)^slope, no limit (most conservative).
+//   EnduranceLimit: the same, but ranges below the knee (N = kneeCycles) do no damage.
+//   TwoSlope:       Eurocode 3 / IIW form: slope m down to the knee, slope2 from the
+//                   knee to cutoffCycles, and no damage below that cut-off range.
+// Defaults: detail category 90 MPa (refRange at 2e6 cycles), m = 3, knee at 5e6
+// cycles, m2 = 5, cut-off at 1e8 cycles, as in EN 1993-1-9 for welded steel.
 struct SnCurve {
+    enum class Shape { SingleSlope, EnduranceLimit, TwoSlope };
+
+    Shape shape = Shape::TwoSlope;
     double slope = 3.0;
     double refRange = 90.0;
     double refCycles = 2.0e6;
+    double kneeCycles = 5.0e6;
+    double slope2 = 5.0;
+    double cutoffCycles = 1.0e8;
 };
 
-// Damage n / N of `count` cycles at one stress range (0 for a non-positive range).
+double kneeRange(const SnCurve& curve);    // stress range at kneeCycles (constant amplitude limit)
+double cutoffRange(const SnCurve& curve);  // TwoSlope: no damage below; otherwise the knee range
+                                           // (EnduranceLimit) or 0 (SingleSlope)
+
+// Cycles to failure at stress range S; +infinity when S does no damage.
+double cyclesToFailure(double stressRange, const SnCurve& curve);
+
+// Mean-stress correction: converts a cycle with tensile mean stress into the
+// zero-mean range that does the same damage. Compressive means are left
+// uncorrected (conservative). None is the Eurocode 3 / IIW practice for welded
+// joints, where residual stresses dominate the mean anyway.
+struct MeanStressCorrection {
+    enum class Method { None, Goodman, Gerber };
+
+    Method method = Method::None;
+    double ultimateStrength = 490.0;  // R_m, same unit as the stresses (S355 steel: 470-630 MPa)
+};
+
+// Goodman: S / (1 - Sm/Rm), Gerber: S / (1 - (Sm/Rm)^2). Sm/Rm is capped at 0.99.
+double equivalentRange(double stressRange, double meanStress, const MeanStressCorrection& correction);
+
+// Damage n / N of `count` cycles at one (already corrected) stress range.
 double cycleDamage(double stressRange, double count, const SnCurve& curve);
 
-// Palmgren-Miner damage D = sum n_i / N_i. Signal ranges are converted to
-// stress with `stressPerUnit`; D = 1 is the predicted end of life. No endurance
-// limit: every cycle contributes (conservative).
-double minerDamage(const RangeHistogram& histogram, const SnCurve& curve, double stressPerUnit);
+// Palmgren-Miner damage per range bin of the matrix (D = the sum). Signal values
+// are converted to stress with `stressPerUnit`; D = 1 is the predicted end of life.
+std::vector<double> damageByRange(const RainflowMatrix& matrix, const SnCurve& curve,
+                                  const MeanStressCorrection& correction, double stressPerUnit);
+double minerDamage(const RainflowMatrix& matrix, const SnCurve& curve,
+                   const MeanStressCorrection& correction, double stressPerUnit);
 
 // "42 s", "3.5 min", "11.1 h", "12 days", "3.4 years", "> 1000 years".
 std::string formatDuration(double seconds);

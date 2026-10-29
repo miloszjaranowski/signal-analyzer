@@ -52,8 +52,10 @@ class SignalGenerator:
     """Phase-continuous generator: block N continues exactly where N-1 ended."""
 
     def __init__(self, fs: int, tones: list[Tone], noise_rms: float,
-                 fault_hz: float, fault_amp: float, resonance_hz: float, seed: int | None):
+                 fault_hz: float, fault_amp: float, resonance_hz: float, seed: int | None,
+                 offset: float = 0.0):
         self.fs = fs
+        self.offset = offset
         self.tones = tones
         self.noise_rms = noise_rms
         self.fault_hz = fault_hz
@@ -64,7 +66,7 @@ class SignalGenerator:
 
     def next_block(self, n: int) -> np.ndarray:
         t = (self.sample_index + np.arange(n)) / self.fs
-        x = np.zeros(n)
+        x = np.full(n, self.offset)
         for tone in self.tones:
             x += tone.amplitude * np.sin(2 * np.pi * tone.freq_hz * t)
         if self.noise_rms > 0:
@@ -94,6 +96,8 @@ def main() -> int:
     ap.add_argument("--tones", default="50:1.0,150:0.3,250:0.15",
                     help="comma-separated freq:amplitude pairs")
     ap.add_argument("--noise", type=float, default=0.05, help="white noise RMS")
+    ap.add_argument("--offset", type=float, default=0.0,
+                    help="constant offset, e.g. a static load (gives cycles a mean)")
     ap.add_argument("--fault-hz", type=float, default=0.0,
                     help="impact repetition rate [Hz], 0 = healthy machine")
     ap.add_argument("--fault-amp", type=float, default=1.5)
@@ -110,7 +114,8 @@ def main() -> int:
         ap.error("--resonance-hz must be below Nyquist (fs/2)")
 
     gen = SignalGenerator(args.fs, parse_tones(args.tones), args.noise,
-                          args.fault_hz, args.fault_amp, args.resonance_hz, args.seed)
+                          args.fault_hz, args.fault_amp, args.resonance_hz, args.seed,
+                          offset=args.offset)
     drop_rng = np.random.default_rng(None if args.seed is None else args.seed + 1)
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     dest = (args.host, args.port)

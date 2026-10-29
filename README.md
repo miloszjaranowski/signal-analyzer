@@ -20,8 +20,9 @@ desktop app displays the waveform, FFT and a scrolling spectrogram live.
   verified against the CWRU 6205 reference; the envelope peak is matched to the closest
   defect harmonic ("BPFO 1× (outer race), −1.0 %")
 - **Fatigue:** streaming rainflow counting (ASTM E1049, checked against its worked
-  example) of every sample, Palmgren-Miner damage on a Basquin S-N curve, damage rate
-  and estimated life, damage share per stress range
+  example) of every sample into a range × mean rainflow matrix, Palmgren-Miner damage on
+  a single-slope, endurance-limit or two-slope (EN 1993-1-9) S-N curve, Goodman / Gerber
+  mean-stress correction, damage rate and estimated life, damage share per stress range
 - **Metrics:** RMS, peak, crest factor, dominant frequency, envelope peak, bearing diagnosis
 - **Link diagnostics:** lost packets (sequence gaps), malformed packets, buffer overruns
 - **Cross-platform sockets** (BSD sockets / Winsock) behind a small RAII wrapper
@@ -119,6 +120,7 @@ Simulator scenarios:
 python simulator/sensor_sim.py --tones 120:1,240:0.3 --noise 0.1
 python simulator/sensor_sim.py --fault-hz 87 --fault-amp 2   # bearing-like impacts -> crest factor rises
 python simulator/sensor_sim.py --drop 0.02                   # 2 % packet loss -> visible in "Link"
+python simulator/sensor_sim.py --offset 0.5                  # static load -> cycles get a mean
 python simulator/sensor_sim.py --help
 ```
 
@@ -185,18 +187,36 @@ residue) counts as half cycles. Feeding the history in chunks gives exactly the 
 cycles as counting it in one piece; the unit tests check this and the standard's worked
 example.
 
-Closed cycles go into a range histogram that widens automatically to the largest range
-seen. Each bin keeps the sum of its ranges, so damage uses the true mean range per bin,
-not the bin centre. Damage is the **Palmgren-Miner** sum `D = Σ nᵢ / Nᵢ` on a **Basquin**
-S-N curve `N = N_ref · (Δσ_ref / Δσ)^m` (default: m = 3, 2·10⁶ cycles at 90 MPa, the form
-of welded steel detail categories in Eurocode 3 and IIW). D = 1 is the predicted end of
-life; the estimated life is the signal time divided by D, assuming the load stays the
-same. There is no endurance limit and no mean-stress correction yet, so the estimate is
-conservative.
+Closed cycles go into a **rainflow matrix** (range × mean) whose axes widen automatically
+to the largest values seen. Each cell keeps the sums of its ranges and means, so damage
+uses the true averages per cell, not bin centres. Damage is the **Palmgren-Miner** sum
+`D = Σ nᵢ / Nᵢ`. D = 1 is the predicted end of life; the estimated life is the signal
+time divided by D, assuming the load stays the same.
 
-Because damage is computed from the histogram outside the DSP thread, the calibration
-and the S-N curve can change while running without recounting. **Reset counting** (GUI)
-starts over.
+The S-N curve `N(Δσ)` comes in three shapes (`Δσ_C` = detail category, the range that
+survives `N_C` = 2·10⁶ cycles):
+
+| Shape                     | Cycles to failure                                                | Below the limit          |
+|---------------------------|------------------------------------------------------------------|--------------------------|
+| Two slopes (default)      | `N_C·(Δσ_C/Δσ)^m` above the knee, `N_D·(Δσ_D/Δσ)^m₂` below it    | no damage under `Δσ_L`   |
+| Endurance limit           | `N_C·(Δσ_C/Δσ)^m`                                                | no damage under `Δσ_D`   |
+| Single slope              | `N_C·(Δσ_C/Δσ)^m`                                                | every cycle counts       |
+
+The defaults follow EN 1993-1-9 for welded steel: m = 3, knee at `N_D` = 5·10⁶ cycles,
+m₂ = 5, cut-off at `N_L` = 10⁸ cycles. That gives `Δσ_D = 0.737·Δσ_C` and
+`Δσ_L = 0.549·Δσ_D` (66.3 and 36.4 MPa for category 90), which the unit tests check.
+
+**Mean-stress correction** turns a cycle with a tensile mean `σm` into the zero-mean range
+that does the same damage: Goodman `Δσ / (1 − σm/R_m)` or Gerber
+`Δσ / (1 − (σm/R_m)²)`, with `R_m` the ultimate tensile strength. Compressive means are
+not credited (conservative). The default is no correction: for welded joints EN 1993-1-9
+and IIW leave it out, because residual stresses near yield dominate the mean anyway.
+Goodman is the usual conservative choice for unwelded parts, Gerber fits ductile steels
+better.
+
+Because damage is computed from the matrix outside the DSP thread, the calibration, the
+S-N curve and the mean-stress correction can change while running without recounting.
+**Reset counting** (GUI) starts over.
 
 The simulator produces acceleration, not stress. Fatigue needs stress, so the
 **stress scale** (MPa per signal unit, e.g. from a strain gauge or an FE transfer
@@ -210,6 +230,16 @@ A case you can check by hand: a pure 50 Hz sine of amplitude 1 at 50 MPa per uni
 ```bash
 python simulator/sensor_sim.py --tones 50:1 --noise 0
 ./build/sa_cli --stress-scale 50 --sn 3:100:2e6   # ... life=11.1 h
+```
+
+`--sn` takes 3 values for a single slope, 4 (`…:N_D`) for an endurance limit and 6
+(`…:N_D:m₂:N_L`) for two slopes; without it the EN 1993-1-9 defaults apply. With a static
+load (`--offset`, here 25 MPa) Goodman at `R_m` = 100 MPa scales the range by
+1 / (1 − 0.25), the damage by (4/3)³ = 2.37, and the life drops to 4.7 h:
+
+```bash
+python simulator/sensor_sim.py --tones 50:1 --noise 0 --offset 0.5
+./build/sa_cli --stress-scale 50 --sn 3:100:2e6 --mean-stress goodman:100   # ... life=4.7 h
 ```
 
 ## Project layout
@@ -230,7 +260,7 @@ simulator/ Python UDP sensor simulator
 - [x] Envelope analysis for bearing fault frequencies
 - [x] Bearing fault frequency calculator (BPFO/BPFI/BSF/FTF from geometry and shaft speed)
 - [x] Rainflow cycle counting and fatigue damage estimate (Miner's rule)
-- [ ] Fatigue refinements: endurance limit / two-slope S-N curve, mean-stress correction
+- [x] Fatigue refinements: endurance limit / two-slope S-N curve, mean-stress correction
 - [ ] Multi-channel streams
 - [ ] Recording to file / replay (CSV, HDF5)
 - [ ] ESP32 + MEMS accelerometer as a real sensor

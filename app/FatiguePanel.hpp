@@ -9,12 +9,14 @@ struct AnalysisFrame;
 }
 
 class PlotWidget;
+class QComboBox;
 class QDoubleSpinBox;
 class QLabel;
 
-// Rainflow + Palmgren-Miner: stress calibration and S-N curve in, accumulated
-// damage, damage rate and estimated life out. Damage is computed here from the
-// frame's rainflow histogram, so the inputs can change without recounting.
+// Rainflow + Palmgren-Miner: stress calibration, S-N curve and mean-stress
+// correction in; accumulated damage, damage rate and estimated life out. Damage
+// is computed here from the frame's rainflow matrix, so every input can change
+// while running without recounting.
 class FatiguePanel : public QWidget {
     Q_OBJECT
 
@@ -29,11 +31,20 @@ signals:
 
 private:
     sa::SnCurve snCurve() const;
+    sa::MeanStressCorrection meanStressCorrection() const;
+    void updateInputs();  // enables the fields the chosen models use, shows derived limits
 
     QDoubleSpinBox* scaleSpin_ = nullptr;
+    QComboBox* shapeCombo_ = nullptr;
     QDoubleSpinBox* slopeSpin_ = nullptr;
     QDoubleSpinBox* refRangeSpin_ = nullptr;
     QDoubleSpinBox* refCyclesSpin_ = nullptr;
+    QDoubleSpinBox* kneeCyclesSpin_ = nullptr;
+    QDoubleSpinBox* slope2Spin_ = nullptr;
+    QDoubleSpinBox* cutoffCyclesSpin_ = nullptr;
+    QLabel* limitsLabel_ = nullptr;
+    QComboBox* meanCombo_ = nullptr;
+    QDoubleSpinBox* strengthSpin_ = nullptr;
 
     QLabel* timeLabel_ = nullptr;
     QLabel* cyclesLabel_ = nullptr;

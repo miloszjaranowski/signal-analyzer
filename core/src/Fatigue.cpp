@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <limits>
+#include <numeric>
 
 namespace sa {
 
@@ -80,65 +82,161 @@ std::vector<RainflowCycle> rainflowCycles(std::span<const float> history) {
     return cycles;
 }
 
-RangeHistogram::RangeHistogram(std::size_t bins) : counts_(bins), rangeSums_(bins) {}
+RainflowMatrix::RainflowMatrix(std::size_t rangeBins, std::size_t meanBins)
+    : rangeBins_(std::max<std::size_t>(rangeBins, 2)),
+      meanBins_(std::max<std::size_t>(meanBins, 2) & ~std::size_t{1}),  // even: symmetric around 0
+      cells_(rangeBins_ * meanBins_) {}
 
-void RangeHistogram::add(double range, double count) {
-    if (!(range > 0.0) || !(count > 0.0)) {
+void RainflowMatrix::add(double range, double mean, double count) {
+    if (!(range > 0.0) || !(count > 0.0) || !std::isfinite(mean)) {
         return;
     }
-    const std::size_t bins = counts_.size();
-    if (binWidth_ == 0.0) {
-        binWidth_ = range / static_cast<double>(bins / 2);  // first range lands mid-scale
+    // The first value of each axis lands halfway out, leaving room both ways.
+    if (rangeWidth_ == 0.0) {
+        rangeWidth_ = range / static_cast<double>(rangeBins_ / 2);
     }
-    while (range >= binWidth_ * static_cast<double>(bins)) {
-        // Double the width: new bin i is old bins 2i and 2i+1, the upper half empties.
-        for (std::size_t i = 0; i < bins / 2; ++i) {
-            counts_[i] = counts_[2 * i] + counts_[2 * i + 1];
-            rangeSums_[i] = rangeSums_[2 * i] + rangeSums_[2 * i + 1];
+    while (range >= rangeWidth_ * static_cast<double>(rangeBins_)) {
+        widenRange();
+    }
+    const auto half = static_cast<double>(meanBins_ / 2);
+    if (meanWidth_ == 0.0 && mean != 0.0) {
+        meanWidth_ = std::abs(mean) / (half / 2.0);
+    }
+    if (meanWidth_ > 0.0) {
+        while (mean >= meanWidth_ * half || mean < -meanWidth_ * half) {
+            widenMean();
         }
-        std::fill(counts_.begin() + static_cast<std::ptrdiff_t>(bins / 2), counts_.end(), 0.0);
-        std::fill(rangeSums_.begin() + static_cast<std::ptrdiff_t>(bins / 2), rangeSums_.end(), 0.0);
-        binWidth_ *= 2.0;
     }
-    const auto bin = static_cast<std::size_t>(range / binWidth_);
-    counts_[bin] += count;
-    rangeSums_[bin] += range * count;
+
+    // Until the first non-zero mean every mean is 0, which is bin meanBins/2 at any width.
+    const auto r = std::min(rangeBins_ - 1, static_cast<std::size_t>(range / rangeWidth_));
+    const auto m = meanWidth_ > 0.0
+                       ? std::min(meanBins_ - 1,
+                                  static_cast<std::size_t>(std::floor(mean / meanWidth_) + half))
+                       : meanBins_ / 2;
+    Cell& cell = at(r, m);
+    cell.count += count;
+    cell.rangeSum += range * count;
+    cell.meanSum += mean * count;
     maxRange_ = std::max(maxRange_, range);
 }
 
-void RangeHistogram::clear() {
-    std::fill(counts_.begin(), counts_.end(), 0.0);
-    std::fill(rangeSums_.begin(), rangeSums_.end(), 0.0);
-    binWidth_ = 0.0;
+void RainflowMatrix::widenRange() {
+    // Double the width: new range bin r holds old bins 2r and 2r+1.
+    std::vector<Cell> merged(cells_.size());
+    for (std::size_t r = 0; r < rangeBins_; ++r) {
+        for (std::size_t m = 0; m < meanBins_; ++m) {
+            const Cell& src = at(r, m);
+            Cell& dst = merged[(r / 2) * meanBins_ + m];
+            dst.count += src.count;
+            dst.rangeSum += src.rangeSum;
+            dst.meanSum += src.meanSum;
+        }
+    }
+    cells_.swap(merged);
+    rangeWidth_ *= 2.0;
+}
+
+void RainflowMatrix::widenMean() {
+    // Double the width around 0: signed bin k = m - meanBins/2 moves to floor(k / 2).
+    const auto half = static_cast<std::ptrdiff_t>(meanBins_ / 2);
+    std::vector<Cell> merged(cells_.size());
+    for (std::size_t r = 0; r < rangeBins_; ++r) {
+        for (std::size_t m = 0; m < meanBins_; ++m) {
+            const std::ptrdiff_t k = static_cast<std::ptrdiff_t>(m) - half;
+            const std::ptrdiff_t newK = k >= 0 ? k / 2 : -((-k + 1) / 2);
+            const Cell& src = at(r, m);
+            Cell& dst = merged[r * meanBins_ + static_cast<std::size_t>(newK + half)];
+            dst.count += src.count;
+            dst.rangeSum += src.rangeSum;
+            dst.meanSum += src.meanSum;
+        }
+    }
+    cells_.swap(merged);
+    meanWidth_ *= 2.0;
+}
+
+void RainflowMatrix::clear() {
+    std::fill(cells_.begin(), cells_.end(), Cell{});
+    rangeWidth_ = 0.0;
+    meanWidth_ = 0.0;
     maxRange_ = 0.0;
 }
 
-double RangeHistogram::meanRange(std::size_t bin) const {
-    return counts_[bin] > 0.0 ? rangeSums_[bin] / counts_[bin] : 0.0;
-}
-
-double RangeHistogram::totalCycles() const {
+double RainflowMatrix::totalCycles() const {
     double total = 0.0;
-    for (const double c : counts_) {
-        total += c;
+    for (const Cell& c : cells_) {
+        total += c.count;
     }
     return total;
 }
 
-double cycleDamage(double stressRange, double count, const SnCurve& curve) {
-    if (!(stressRange > 0.0) || !(count > 0.0)) {
-        return 0.0;
-    }
-    const double cyclesToFailure = curve.refCycles * std::pow(curve.refRange / stressRange, curve.slope);
-    return count / cyclesToFailure;
+double kneeRange(const SnCurve& curve) {
+    return curve.refRange * std::pow(curve.refCycles / curve.kneeCycles, 1.0 / curve.slope);
 }
 
-double minerDamage(const RangeHistogram& histogram, const SnCurve& curve, double stressPerUnit) {
-    double damage = 0.0;
-    for (std::size_t i = 0; i < histogram.counts().size(); ++i) {
-        damage += cycleDamage(histogram.meanRange(i) * stressPerUnit, histogram.counts()[i], curve);
+double cutoffRange(const SnCurve& curve) {
+    switch (curve.shape) {
+        case SnCurve::Shape::SingleSlope: return 0.0;
+        case SnCurve::Shape::EnduranceLimit: return kneeRange(curve);
+        case SnCurve::Shape::TwoSlope:
+            return kneeRange(curve) * std::pow(curve.kneeCycles / curve.cutoffCycles, 1.0 / curve.slope2);
+    }
+    return 0.0;
+}
+
+double cyclesToFailure(double stressRange, const SnCurve& curve) {
+    constexpr double kNoDamage = std::numeric_limits<double>::infinity();
+    if (!(stressRange > 0.0) || stressRange < cutoffRange(curve)) {
+        return kNoDamage;
+    }
+    if (curve.shape == SnCurve::Shape::TwoSlope) {
+        const double knee = kneeRange(curve);
+        if (stressRange < knee) {
+            return curve.kneeCycles * std::pow(knee / stressRange, curve.slope2);
+        }
+    }
+    return curve.refCycles * std::pow(curve.refRange / stressRange, curve.slope);
+}
+
+double equivalentRange(double stressRange, double meanStress, const MeanStressCorrection& correction) {
+    using Method = MeanStressCorrection::Method;
+    if (correction.method == Method::None || !(meanStress > 0.0) ||
+        !(correction.ultimateStrength > 0.0)) {
+        return stressRange;
+    }
+    const double ratio = std::min(meanStress / correction.ultimateStrength, 0.99);
+    const double factor = correction.method == Method::Goodman ? 1.0 - ratio : 1.0 - ratio * ratio;
+    return stressRange / factor;
+}
+
+double cycleDamage(double stressRange, double count, const SnCurve& curve) {
+    if (!(count > 0.0)) {
+        return 0.0;
+    }
+    return count / cyclesToFailure(stressRange, curve);  // n / inf = 0 below the cut-off
+}
+
+std::vector<double> damageByRange(const RainflowMatrix& matrix, const SnCurve& curve,
+                                  const MeanStressCorrection& correction, double stressPerUnit) {
+    std::vector<double> damage(matrix.rangeBins());
+    for (std::size_t r = 0; r < matrix.rangeBins(); ++r) {
+        for (std::size_t m = 0; m < matrix.meanBins(); ++m) {
+            const RainflowMatrix::Cell& c = matrix.cell(r, m);
+            if (c.count > 0.0) {
+                const double range = c.rangeSum / c.count * stressPerUnit;
+                const double mean = c.meanSum / c.count * stressPerUnit;
+                damage[r] += cycleDamage(equivalentRange(range, mean, correction), c.count, curve);
+            }
+        }
     }
     return damage;
+}
+
+double minerDamage(const RainflowMatrix& matrix, const SnCurve& curve,
+                   const MeanStressCorrection& correction, double stressPerUnit) {
+    const auto perRange = damageByRange(matrix, curve, correction, stressPerUnit);
+    return std::accumulate(perRange.begin(), perRange.end(), 0.0);
 }
 
 std::string formatDuration(double seconds) {

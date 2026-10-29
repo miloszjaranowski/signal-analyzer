@@ -157,10 +157,10 @@ void Pipeline::dspLoop(std::stop_token stop) {
     std::uint64_t frameIndex = 0;
 
     RainflowCounter rainflow;
-    RangeHistogram closedCycles;
+    RainflowMatrix closedCycles;
     double fatigueSeconds = 0.0;
     const RainflowCounter::CycleSink countCycle = [&closedCycles](const RainflowCycle& c) {
-        closedCycles.add(c.range, c.count);
+        closedCycles.add(c.range, c.mean, c.count);
     };
 
     while (!stop.stop_requested()) {
@@ -197,7 +197,7 @@ void Pipeline::dspLoop(std::stop_token stop) {
             fatigueSeconds += static_cast<double>(n) / fs;
         }
         // Built at most once per chunk; frames from the same chunk share it.
-        std::optional<RangeHistogram> fatigueSnapshot;
+        std::optional<RainflowMatrix> fatigueSnapshot;
 
         while (nextFrameEnd <= streamEnd) {
             const auto behind = static_cast<std::size_t>(streamEnd - nextFrameEnd);
@@ -241,7 +241,7 @@ void Pipeline::dspLoop(std::stop_token stop) {
             if (!fatigueSnapshot) {
                 fatigueSnapshot = closedCycles;
                 for (const RainflowCycle& c : rainflow.residue()) {
-                    fatigueSnapshot->add(c.range, c.count);
+                    fatigueSnapshot->add(c.range, c.mean, c.count);
                 }
             }
             frame->rainflow = *fatigueSnapshot;

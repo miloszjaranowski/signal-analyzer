@@ -80,3 +80,8 @@ jobs:
           python simulator/sensor_sim.py --duration 6 --tones 50:1 --noise 0 --seed 1 &
           ./build/sa_cli --stress-scale 50 --sn 3:100:2e6 --seconds 5 | tee fatigue.log
           tail -1 fatigue.log | grep -E "life=11\.1 h"
+          # Static offset 0.5 = 25 MPa mean; Goodman with Rm = 100 MPa scales the range
+          # by 1 / (1 - 0.25), the damage by (4/3)^3: life = 11.1 h / 2.37 = 4.7 h
+          python simulator/sensor_sim.py --duration 6 --tones 50:1 --noise 0 --offset 0.5 --seed 1 &
+          ./build/sa_cli --stress-scale 50 --sn 3:100:2e6 --mean-stress goodman:100 --seconds 5 | tee goodman.log
+          tail -1 goodman.log | grep -E "life=4\.7 h"
