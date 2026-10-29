@@ -7,14 +7,19 @@ Packet format (little-endian), matching core/include/sa/Protocol.hpp:
     uint32 sequence
     uint32 sample_rate
     uint16 sample_count
-    uint16 channel
+    uint16 channel          (0..7; each channel has its own sequence numbers)
     float32 samples[sample_count]
+
+With --channels N every block is sent as N packets, one per channel. All
+channels carry the same tones with independent noise, scaled by --gains; the
+bearing fault (--fault-hz) is only on --fault-channel.
 
 Examples:
     python sensor_sim.py                               # 50 Hz + harmonics, light noise
     python sensor_sim.py --tones 120:1,240:0.3 --noise 0.1
     python sensor_sim.py --fault-hz 87 --fault-amp 2   # bearing-like impacts
     python sensor_sim.py --drop 0.02                   # drop 2 % of packets
+    python sensor_sim.py --channels 3 --gains 1,0.5,0.25 --fault-hz 87 --fault-channel 1
 """
 
 from __future__ import annotations
@@ -31,6 +36,7 @@ import numpy as np
 MAGIC = 0x31504153
 HEADER = struct.Struct("<IIIHH")
 MAX_SAMPLES_PER_PACKET = 4096
+MAX_CHANNELS = 8
 
 
 @dataclass
@@ -104,6 +110,12 @@ def main() -> int:
     ap.add_argument("--resonance-hz", type=float, default=2_500.0)
     ap.add_argument("--drop", type=float, default=0.0,
                     help="probability of dropping a packet (tests loss detection)")
+    ap.add_argument("--channels", type=int, default=1,
+                    help=f"number of channels, 1..{MAX_CHANNELS}")
+    ap.add_argument("--gains", default="",
+                    help="comma-separated gain per channel (default 1 for all)")
+    ap.add_argument("--fault-channel", type=int, default=0,
+                    help="channel that carries the bearing fault")
     ap.add_argument("--duration", type=float, default=0.0, help="seconds, 0 = forever")
     ap.add_argument("--seed", type=int, default=None)
     args = ap.parse_args()
@@ -112,28 +124,39 @@ def main() -> int:
         ap.error(f"--block must be in 1..{MAX_SAMPLES_PER_PACKET}")
     if args.resonance_hz >= args.fs / 2:
         ap.error("--resonance-hz must be below Nyquist (fs/2)")
+    if not 1 <= args.channels <= MAX_CHANNELS:
+        ap.error(f"--channels must be in 1..{MAX_CHANNELS}")
+    gains = [float(g) for g in args.gains.split(",") if g.strip()] or [1.0]
+    gains += [gains[-1]] * (args.channels - len(gains))  # repeat the last gain
 
-    gen = SignalGenerator(args.fs, parse_tones(args.tones), args.noise,
-                          args.fault_hz, args.fault_amp, args.resonance_hz, args.seed,
-                          offset=args.offset)
+    tones = parse_tones(args.tones)
+    generators = []
+    for ch in range(args.channels):
+        seed = None if args.seed is None else args.seed + 10 * ch  # channel 0 keeps --seed
+        fault_hz = args.fault_hz if ch == args.fault_channel else 0.0
+        generators.append(SignalGenerator(args.fs, tones, args.noise, fault_hz,
+                                          args.fault_amp, args.resonance_hz, seed,
+                                          offset=args.offset))
     drop_rng = np.random.default_rng(None if args.seed is None else args.seed + 1)
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     dest = (args.host, args.port)
 
     packet_period = args.block / args.fs
-    print(f"Streaming to {args.host}:{args.port}  fs={args.fs} Hz  "
-          f"{args.block} samples/packet ({1 / packet_period:.1f} packets/s). Ctrl+C to stop.")
+    print(f"Streaming {args.channels} channel(s) to {args.host}:{args.port}  fs={args.fs} Hz  "
+          f"{args.block} samples/packet ({1 / packet_period:.1f} packets/s per channel). "
+          "Ctrl+C to stop.")
 
     start = time.perf_counter()
     seq = sent = dropped = 0
     last_report = start
     try:
         while args.duration <= 0 or seq * packet_period < args.duration:
-            samples = gen.next_block(args.block)
-            if args.drop > 0 and drop_rng.random() < args.drop:
-                dropped += 1
-            else:
-                header = HEADER.pack(MAGIC, seq & 0xFFFF_FFFF, args.fs, args.block, 0)
+            for ch, gen in enumerate(generators):
+                samples = (gen.next_block(args.block) * gains[ch]).astype("<f4")
+                if args.drop > 0 and drop_rng.random() < args.drop:
+                    dropped += 1
+                    continue
+                header = HEADER.pack(MAGIC, seq & 0xFFFF_FFFF, args.fs, args.block, ch)
                 sock.sendto(header + samples.tobytes(), dest)
                 sent += 1
             seq += 1

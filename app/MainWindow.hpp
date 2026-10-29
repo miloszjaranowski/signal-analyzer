@@ -3,18 +3,20 @@
 #include <QMainWindow>
 
 #include <cstdint>
+#include <map>
 #include <memory>
+#include <vector>
 
 #include "sa/Pipeline.hpp"
 
 class QCheckBox;
 class QComboBox;
 class QDoubleSpinBox;
-class QLabel;
 class QPushButton;
 class QSpinBox;
 class QTimer;
 class BearingPanel;
+class ChannelTable;
 class FatiguePanel;
 class PlotWidget;
 class SpectrogramWidget;
@@ -31,16 +33,25 @@ private slots:
     void refresh();
     void updateSpectrumScale();
     void applyEnvelopeBand();
+    void selectChannel(std::uint16_t channel);
 
 private:
     void startPipeline();
     void stopPipeline();
     void setControlsRunning(bool running);
-    void showFrame(const sa::AnalysisFrame& frame);
+    void showFrame(const sa::AnalysisFrame& frame);  // plots and panels: the selected channel
+    void updateChannelTable();                       // all channels, from the caches below
+    QString bearingText(const sa::AnalysisFrame& frame) const;
 
     std::unique_ptr<sa::Pipeline> pipeline_;
-    std::uint64_t lastFrameIndex_ = 0;
+    std::uint16_t channel_ = 0;     // shown in the plots
+    std::uint64_t lastFrameIndex_ = 0;  // of channel_
     std::shared_ptr<const sa::AnalysisFrame> shownFrame_;  // redrawn when the scale changes
+
+    // Latest state of every channel; kept after Stop so the table still reacts
+    // to changed bearing or fatigue settings.
+    std::map<std::uint16_t, std::shared_ptr<const sa::AnalysisFrame>> latestFrames_;
+    std::vector<sa::ChannelStats> channelStats_;
 
     QSpinBox* portSpin_ = nullptr;
     QComboBox* fftCombo_ = nullptr;
@@ -55,17 +66,9 @@ private:
     PlotWidget* envelopePlot_ = nullptr;
     PlotWidget* spectrumPlot_ = nullptr;
     SpectrogramWidget* spectrogram_ = nullptr;
+    ChannelTable* channelTable_ = nullptr;
     BearingPanel* bearingPanel_ = nullptr;
     FatiguePanel* fatiguePanel_ = nullptr;
-
-    QLabel* rmsLabel_ = nullptr;
-    QLabel* peakLabel_ = nullptr;
-    QLabel* crestLabel_ = nullptr;
-    QLabel* domFreqLabel_ = nullptr;
-    QLabel* envPeakLabel_ = nullptr;
-    QLabel* bearingLabel_ = nullptr;
-    QLabel* rateLabel_ = nullptr;
-    QLabel* linkLabel_ = nullptr;
 
     QTimer* refreshTimer_ = nullptr;
 };

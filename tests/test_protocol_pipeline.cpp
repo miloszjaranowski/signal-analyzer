@@ -89,6 +89,82 @@ TEST(Protocol, RejectsMalformed) {
     EXPECT_FALSE(sa::parsePacket(sa::serializePacket(zeroRate, samples), parsed, out));
 
     EXPECT_FALSE(sa::parsePacket({}, parsed, out));
+
+    sa::PacketHeader badChannel;
+    badChannel.sampleRate = 1000;
+    badChannel.channel = sa::kMaxChannels;
+    EXPECT_FALSE(sa::parsePacket(sa::serializePacket(badChannel, samples), parsed, out));
+}
+
+// Two interleaved channels with different signals and their own sequence
+// numbers, plus one packet for a channel out of range.
+TEST(Pipeline, SeparatesChannels) {
+    sa::PipelineConfig cfg;
+    cfg.port = 0;
+    cfg.fftSize = 1024;
+    cfg.hopSize = 256;
+    sa::Pipeline pipeline(cfg);
+    pipeline.start();
+
+    struct Stream {
+        std::uint16_t channel;
+        double freq;
+        double amplitude;
+    };
+    const Stream streams[] = {{0, kFreq, 1.0}, {2, 2.0 * kFreq, 0.5}};
+    sa::UdpSender sender("127.0.0.1", pipeline.port());
+    std::vector<float> samples(kBlock);
+    for (std::uint32_t seq = 0; seq < 40; ++seq) {
+        for (const Stream& s : streams) {
+            if (s.channel == 2 && seq == 10) {
+                continue;  // lost on channel 2 only
+            }
+            for (std::size_t i = 0; i < kBlock; ++i) {
+                const double t = double(seq * kBlock + i) / kFs;
+                samples[i] = static_cast<float>(s.amplitude * std::sin(2.0 * std::numbers::pi * s.freq * t));
+            }
+            sa::PacketHeader h;
+            h.sequence = seq;
+            h.sampleRate = kFs;
+            h.channel = s.channel;
+            sender.send(sa::serializePacket(h, samples));
+        }
+        std::this_thread::sleep_for(1ms);
+    }
+    sa::PacketHeader outOfRange;
+    outOfRange.sampleRate = kFs;
+    outOfRange.channel = sa::kMaxChannels;
+    sender.send(sa::serializePacket(outOfRange, samples));
+
+    for (int i = 0; i < 200 && pipeline.stats().packetsReceived < 79; ++i) {
+        std::this_thread::sleep_for(10ms);
+    }
+    std::this_thread::sleep_for(50ms);
+    const auto stats = pipeline.stats();
+    pipeline.stop();
+
+    EXPECT_EQ(pipeline.channels(), (std::vector<std::uint16_t>{0, 2}));
+    EXPECT_EQ(stats.packetsMalformed, 1u);
+    ASSERT_EQ(stats.channels.size(), 2u);
+    EXPECT_EQ(stats.channels[0].channel, 0u);
+    EXPECT_EQ(stats.channels[0].packetsReceived, 40u);
+    EXPECT_EQ(stats.channels[0].packetsLost, 0u);
+    EXPECT_EQ(stats.channels[1].channel, 2u);
+    EXPECT_EQ(stats.channels[1].packetsReceived, 39u);
+    EXPECT_EQ(stats.channels[1].packetsLost, 1u);
+
+    const auto ch0 = pipeline.latestFrame(0);
+    const auto ch2 = pipeline.latestFrame(2);
+    ASSERT_TRUE(ch0);
+    ASSERT_TRUE(ch2);
+    EXPECT_EQ(ch0->channel, 0u);
+    EXPECT_EQ(ch2->channel, 2u);
+    EXPECT_NEAR(ch0->dominantHz, kFreq, 1.0);
+    EXPECT_NEAR(ch2->dominantHz, 2.0 * kFreq, 1.0);
+    EXPECT_NEAR(ch0->rms, 1.0 / std::sqrt(2.0), 0.02);
+    EXPECT_NEAR(ch2->rms, 0.5 / std::sqrt(2.0), 0.02);
+    EXPECT_FALSE(pipeline.latestFrame(1));
+    EXPECT_TRUE(pipeline.framesSince(1, 0).empty());
 }
 
 // End-to-end over loopback: real sockets, real threads.
@@ -150,7 +226,7 @@ TEST(Pipeline, FramesSinceReturnsRecentFramesInOrder) {
     const auto stats = pipeline.stats();
     ASSERT_EQ(stats.framesComputed, (40u * kBlock - cfg.fftSize) / cfg.hopSize + 1);
 
-    const auto all = pipeline.framesSince(0);
+    const auto all = pipeline.framesSince(0, 0);
     ASSERT_EQ(all.size(), cfg.frameHistory);  // older frames were evicted
     for (std::size_t i = 1; i < all.size(); ++i) {
         EXPECT_EQ(all[i]->index, all[i - 1]->index + 1);
@@ -158,8 +234,8 @@ TEST(Pipeline, FramesSinceReturnsRecentFramesInOrder) {
     EXPECT_EQ(all.back()->index, stats.framesComputed);
     EXPECT_EQ(all.back(), pipeline.latestFrame());
 
-    const auto tail = pipeline.framesSince(all[1]->index);
+    const auto tail = pipeline.framesSince(0, all[1]->index);
     ASSERT_EQ(tail.size(), 2u);
     EXPECT_EQ(tail.front(), all[2]);
-    EXPECT_TRUE(pipeline.framesSince(all.back()->index).empty());
+    EXPECT_TRUE(pipeline.framesSince(0, all.back()->index).empty());
 }

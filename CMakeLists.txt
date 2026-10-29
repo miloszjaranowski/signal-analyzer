@@ -62,6 +62,8 @@ if(SA_BUILD_GUI)
       app/main.cpp
       app/BearingPanel.cpp
       app/BearingPanel.hpp
+      app/ChannelTable.cpp
+      app/ChannelTable.hpp
       app/FatiguePanel.cpp
       app/FatiguePanel.hpp
       app/MainWindow.cpp

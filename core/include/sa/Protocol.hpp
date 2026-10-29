@@ -15,14 +15,15 @@ static_assert(std::endian::native == std::endian::little,
 //
 //   offset  size  field
 //   0       4     magic        0x31504153 ("SAP1")
-//   4       4     sequence     incremented by 1 per packet
+//   4       4     sequence     incremented by 1 per packet of this channel
 //   8       4     sampleRate   [Hz]
 //   12      2     sampleCount  number of float32 samples that follow
-//   14      2     channel      reserved for multi-channel, 0 for now
+//   14      2     channel      0 .. kMaxChannels-1; each channel is an independent stream
 //   16      4*N   samples      IEEE-754 float32
 inline constexpr std::uint32_t kMagic = 0x31504153;
 inline constexpr std::size_t kHeaderSize = 16;
 inline constexpr std::size_t kMaxSamplesPerPacket = 4096;
+inline constexpr std::uint16_t kMaxChannels = 8;
 
 struct PacketHeader {
     std::uint32_t magic = kMagic;
@@ -33,7 +34,8 @@ struct PacketHeader {
 };
 
 // Parses a datagram. Reuses `samples` capacity so the hot path does not allocate.
-// Returns false for anything malformed (bad magic, wrong size, zero sample rate).
+// Returns false for anything malformed (bad magic, wrong size, zero sample rate,
+// channel out of range).
 bool parsePacket(std::span<const std::byte> data, PacketHeader& header,
                  std::vector<float>& samples);
 

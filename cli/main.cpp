@@ -1,4 +1,5 @@
-// Headless front-end: runs the same pipeline as the GUI and prints live metrics.
+// Headless front-end: runs the same pipeline as the GUI and prints live metrics,
+// one line per channel.
 // Useful on servers, in CI and for quick checks without Qt.
 //
 //   sa_cli [--port 5005] [--fft 4096] [--env-band 1000:4000]
@@ -185,8 +186,13 @@ int main(int argc, char** argv) {
         while (pipeline.running()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
+            // One line per channel, in channel order.
             const auto stats = pipeline.stats();
-            if (const auto frame = pipeline.latestFrame()) {
+            for (const sa::ChannelStats& cs : stats.channels) {
+                const auto frame = pipeline.latestFrame(cs.channel);
+                if (!frame) {
+                    continue;
+                }
                 const std::string match = bearing ? describeMatch(*frame, *bearing) + "  " : "";
                 const double damage =
                     sa::minerDamage(frame->rainflow, snCurve, meanStress, stressScale);
@@ -196,18 +202,19 @@ int main(int argc, char** argv) {
                                          : belowLimit ? "unlimited"
                                                       : "-";
                 std::printf(
-                    "fs=%u Hz  RMS=%.4f  peak=%.4f  crest=%.2f  f_dom=%.2f Hz  f_env=%.2f Hz (%+.0f dB)  "
-                    "%sD=%.3g life=%s  | pkts=%llu lost=%llu bad=%llu dropped=%llu buf=%zu\n",
-                    frame->sampleRate, frame->rms, frame->peak,
+                    "ch=%u fs=%u Hz  RMS=%.4f  peak=%.4f  crest=%.2f  f_dom=%.2f Hz  "
+                    "f_env=%.2f Hz (%+.0f dB)  %sD=%.3g life=%s  "
+                    "| pkts=%llu lost=%llu bad=%llu dropped=%llu buf=%zu\n",
+                    unsigned(cs.channel), frame->sampleRate, frame->rms, frame->peak,
                     frame->rms > 0 ? frame->peak / frame->rms : 0.0f, frame->dominantHz,
                     frame->envelopePeakHz, frame->envelopePeakProminenceDb, match.c_str(), damage,
                     life.c_str(),
-                    static_cast<unsigned long long>(stats.packetsReceived),
-                    static_cast<unsigned long long>(stats.packetsLost),
+                    static_cast<unsigned long long>(cs.packetsReceived),
+                    static_cast<unsigned long long>(cs.packetsLost),
                     static_cast<unsigned long long>(stats.packetsMalformed),
-                    static_cast<unsigned long long>(stats.samplesDropped), stats.bufferFill);
-                std::fflush(stdout);
+                    static_cast<unsigned long long>(cs.samplesDropped), cs.bufferFill);
             }
+            std::fflush(stdout);
 
             const auto elapsed = std::chrono::steady_clock::now() - startTime;
             if (seconds > 0 && elapsed >= std::chrono::seconds(seconds)) {

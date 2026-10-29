@@ -4,7 +4,6 @@
 #include <QComboBox>
 #include <QDockWidget>
 #include <QDoubleSpinBox>
-#include <QGridLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -18,6 +17,7 @@
 #include <algorithm>
 
 #include "BearingPanel.hpp"
+#include "ChannelTable.hpp"
 #include "FatiguePanel.hpp"
 #include "PlotWidget.hpp"
 #include "SpectrogramWidget.hpp"
@@ -30,17 +30,6 @@ namespace {
 constexpr double kDbFloor = -100.0;
 constexpr double kDbCeiling = 10.0;
 
-QLabel* makeValueLabel() {
-    auto* label = new QLabel(QStringLiteral("—"));
-    label->setMinimumWidth(110);
-    label->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    QFont f = label->font();
-    f.setFamily(QStringLiteral("monospace"));
-    f.setStyleHint(QFont::Monospace);
-    label->setFont(f);
-    return label;
-}
-
 QDoubleSpinBox* makeHzSpin(double value) {
     auto* spin = new QDoubleSpinBox;
     spin->setRange(0.0, 1'000'000.0);
@@ -49,6 +38,17 @@ QDoubleSpinBox* makeHzSpin(double value) {
     spin->setSuffix(QStringLiteral(" Hz"));
     spin->setValue(value);
     return spin;
+}
+
+bool hasClearLine(const sa::AnalysisFrame& frame) {
+    return frame.envelopePeakProminenceDb >= sa::kClearLineDb;
+}
+
+QString envelopePeakText(const sa::AnalysisFrame& frame) {
+    const QString prominence = QStringLiteral("+%1 dB").arg(frame.envelopePeakProminenceDb, 0, 'f', 0);
+    return hasClearLine(frame)
+               ? QStringLiteral("%1 Hz (%2)").arg(frame.envelopePeakHz, 0, 'f', 2).arg(prominence)
+               : MainWindow::tr("none (%1)").arg(prominence);
 }
 
 }  // namespace
@@ -136,37 +136,14 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     envelopePlot_->setAutoScale(/*symmetric=*/false);
     envelopePlot_->setXMax(envMaxFreqSpin_->value());
 
-    // --- Metrics ---------------------------------------------------------------
-    rmsLabel_ = makeValueLabel();
-    peakLabel_ = makeValueLabel();
-    crestLabel_ = makeValueLabel();
-    domFreqLabel_ = makeValueLabel();
-    envPeakLabel_ = makeValueLabel();
-    bearingLabel_ = makeValueLabel();
-    rateLabel_ = makeValueLabel();
-    linkLabel_ = makeValueLabel();
-
-    auto* metricsBox = new QGroupBox(tr("Metrics"));
-    auto* metrics = new QGridLayout(metricsBox);
-    metrics->setHorizontalSpacing(12);
-    constexpr int kMetricsPerRow = 4;
-    int metricCount = 0;
-    auto addMetric = [metrics, &metricCount](const QString& name, QLabel* value) {
-        const int row = metricCount / kMetricsPerRow;
-        const int col = (metricCount % kMetricsPerRow) * 2;
-        metrics->addWidget(new QLabel(name), row, col);
-        metrics->addWidget(value, row, col + 1);
-        ++metricCount;
-    };
-    addMetric(tr("RMS"), rmsLabel_);
-    addMetric(tr("Peak"), peakLabel_);
-    addMetric(tr("Crest factor"), crestLabel_);
-    addMetric(tr("Dominant f"), domFreqLabel_);
-    addMetric(tr("Envelope peak"), envPeakLabel_);
-    addMetric(tr("Sample rate"), rateLabel_);
-    addMetric(tr("Link"), linkLabel_);
-    addMetric(tr("Bearing"), bearingLabel_);
-    metrics->setColumnStretch(kMetricsPerRow * 2, 1);
+    // --- Channels: one row each, the selected row is shown in the plots --------
+    channelTable_ = new ChannelTable({tr("Sample rate"), tr("RMS"), tr("Peak"), tr("Crest"),
+                                      tr("Dominant f"), tr("Envelope peak"), tr("Bearing"),
+                                      tr("Fatigue life"), tr("Link")});
+    connect(channelTable_, &ChannelTable::channelSelected, this, &MainWindow::selectChannel);
+    auto* channelsBox = new QGroupBox(tr("Channels (select a row to show it in the plots)"));
+    auto* channelsLayout = new QVBoxLayout(channelsBox);
+    channelsLayout->addWidget(channelTable_);
 
     auto* central = new QWidget;
     auto* layout = new QVBoxLayout(central);
@@ -178,7 +155,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     layout->addLayout(topPlots, 1);
     layout->addWidget(spectrumPlot_, 1);
     layout->addWidget(spectrogram_, 1);
-    layout->addWidget(metricsBox);
+    layout->addWidget(channelsBox);
     setCentralWidget(central);
     statusBar()->showMessage(tr("Stopped. Start the Python simulator, then press Start."));
 
@@ -187,6 +164,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         if (shownFrame_) {
             showFrame(*shownFrame_);
         }
+        updateChannelTable();
     };
     auto addPanel = [this](const QString& title, QWidget* panel) {
         auto* dock = new QDockWidget(title, this);
@@ -247,6 +225,9 @@ void MainWindow::startPipeline() {
     }
 
     lastFrameIndex_ = 0;
+    latestFrames_.clear();
+    channelStats_.clear();
+    updateChannelTable();
     spectrogram_->clear();
     setControlsRunning(true);
     refreshTimer_->start();
@@ -299,6 +280,23 @@ void MainWindow::applyEnvelopeBand() {
     }
 }
 
+void MainWindow::selectChannel(std::uint16_t channel) {
+    if (channel == channel_) {
+        return;
+    }
+    channel_ = channel;
+    channelTable_->selectChannel(channel);
+    // Start the plots over; the next refresh refills the spectrogram from this
+    // channel's recent frames.
+    lastFrameIndex_ = 0;
+    spectrogram_->clear();
+    const auto cached = latestFrames_.find(channel);
+    shownFrame_ = cached != latestFrames_.end() ? cached->second : nullptr;
+    if (shownFrame_) {
+        showFrame(*shownFrame_);
+    }
+}
+
 void MainWindow::refresh() {
     if (!pipeline_) {
         return;
@@ -314,16 +312,30 @@ void MainWindow::refresh() {
     }
 
     const auto stats = pipeline_->stats();
-    linkLabel_->setText(tr("%1 pkts, %2 lost").arg(qulonglong(stats.packetsReceived)).arg(qulonglong(stats.packetsLost)));
     statusBar()->showMessage(
-        tr("Port %1 | frames %2 | malformed %3 | dropped samples %4 | buffer %5")
+        tr("Port %1 | channels %2 | frames %3 | malformed %4 | dropped samples %5 | buffer %6")
             .arg(pipeline_->port())
+            .arg(qulonglong(stats.channels.size()))
             .arg(qulonglong(stats.framesComputed))
             .arg(qulonglong(stats.packetsMalformed))
             .arg(qulonglong(stats.samplesDropped))
             .arg(qulonglong(stats.bufferFill)));
 
-    const auto frames = pipeline_->framesSince(lastFrameIndex_);
+    channelStats_ = stats.channels;
+    for (const sa::ChannelStats& c : channelStats_) {
+        if (auto frame = pipeline_->latestFrame(c.channel)) {
+            latestFrames_[c.channel] = std::move(frame);
+        }
+    }
+    // Follow the data if the selected channel has none, e.g. a sender on channel 3 only.
+    const bool selectedPresent = std::any_of(channelStats_.begin(), channelStats_.end(),
+                                             [this](const auto& c) { return c.channel == channel_; });
+    if (!selectedPresent && !channelStats_.empty()) {
+        selectChannel(channelStats_.front().channel);
+    }
+    updateChannelTable();
+
+    const auto frames = pipeline_->framesSince(channel_, lastFrameIndex_);
     if (frames.empty()) {
         return;
     }
@@ -337,14 +349,59 @@ void MainWindow::refresh() {
     showFrame(*shownFrame_);
 }
 
+void MainWindow::updateChannelTable() {
+    const QString none = QStringLiteral("—");
+    std::vector<ChannelTable::Row> rows;
+    for (const sa::ChannelStats& c : channelStats_) {
+        ChannelTable::Row row;
+        row.channel = c.channel;
+        const auto cached = latestFrames_.find(c.channel);
+        if (cached != latestFrames_.end()) {
+            const sa::AnalysisFrame& f = *cached->second;
+            row.cells = {QStringLiteral("%1 Hz").arg(f.sampleRate),
+                         QString::number(f.rms, 'f', 4),
+                         QString::number(f.peak, 'f', 4),
+                         f.rms > 0 ? QString::number(f.peak / f.rms, 'f', 2) : none,
+                         QStringLiteral("%1 Hz").arg(f.dominantHz, 0, 'f', 2),
+                         envelopePeakText(f),
+                         bearingText(f),
+                         fatiguePanel_->lifeText(f)};
+        } else {
+            row.cells = {QStringLiteral("%1 Hz").arg(c.sampleRate), none, none, none, none, none, none, none};
+        }
+        row.cells << tr("%1 pkts, %2 lost").arg(qulonglong(c.packetsReceived)).arg(qulonglong(c.packetsLost));
+        rows.push_back(std::move(row));
+    }
+    channelTable_->setRows(rows);
+    channelTable_->selectChannel(channel_);
+}
+
+QString MainWindow::bearingText(const sa::AnalysisFrame& frame) const {
+    const auto& bearing = bearingPanel_->frequencies();
+    if (!hasClearLine(frame) || !bearing) {
+        return QStringLiteral("—");
+    }
+    const auto match = sa::matchBearingFault(*bearing, frame.envelopePeakHz);
+    if (!match) {
+        return tr("no defect frequency matches");
+    }
+    return tr("%1 %2× (%3), %4 %")
+        .arg(QString::fromUtf8(sa::shortName(match->fault)))
+        .arg(match->harmonic)
+        .arg(QString::fromUtf8(sa::description(match->fault)))
+        .arg(QString::asprintf("%+.1f", match->errorPercent));
+}
+
 void MainWindow::showFrame(const sa::AnalysisFrame& frame) {
     const double dtMs = 1000.0 / frame.sampleRate;
+    waveformPlot_->setTitle(tr("Waveform, channel %1").arg(frame.channel));
     waveformPlot_->setData(frame.waveform, 0.0, dtMs);
 
     std::vector<float> spectrum = frame.spectrum;
     if (dbCheck_->isChecked()) {
         std::transform(spectrum.begin(), spectrum.end(), spectrum.begin(), sa::amplitudeToDb);
     }
+    spectrumPlot_->setTitle(tr("Amplitude spectrum (Hann window), channel %1").arg(frame.channel));
     spectrumPlot_->setData(std::move(spectrum), 0.0, frame.binHz);
 
     envelopePlot_->setTitle(tr("Envelope spectrum, band %1–%2 Hz")
@@ -353,10 +410,9 @@ void MainWindow::showFrame(const sa::AnalysisFrame& frame) {
     envelopePlot_->setData(frame.envelopeSpectrum, 0.0, frame.binHz);
     // Harmonics of a clear envelope line (a fault shows a whole series), and the
     // expected bearing defect frequencies on a second label row.
-    const bool clearLine = frame.envelopePeakProminenceDb >= sa::kClearLineDb;
     const auto& bearing = bearingPanel_->frequencies();
     std::vector<PlotWidget::Marker> markers;
-    if (clearLine) {
+    if (hasClearLine(frame)) {
         for (int h = 1; h <= 5; ++h) {
             markers.push_back({h * double(frame.envelopePeakHz), QStringLiteral("%1×").arg(h)});
         }
@@ -370,31 +426,5 @@ void MainWindow::showFrame(const sa::AnalysisFrame& frame) {
     }
     envelopePlot_->setMarkers(std::move(markers));
 
-    rmsLabel_->setText(QString::number(frame.rms, 'f', 4));
-    peakLabel_->setText(QString::number(frame.peak, 'f', 4));
-    crestLabel_->setText(frame.rms > 0 ? QString::number(frame.peak / frame.rms, 'f', 2)
-                                       : QStringLiteral("—"));
-    domFreqLabel_->setText(QStringLiteral("%1 Hz").arg(frame.dominantHz, 0, 'f', 2));
-    const QString prominence = QStringLiteral("+%1 dB").arg(frame.envelopePeakProminenceDb, 0, 'f', 0);
-    envPeakLabel_->setText(clearLine ? QStringLiteral("%1 Hz (%2)")
-                                           .arg(frame.envelopePeakHz, 0, 'f', 2)
-                                           .arg(prominence)
-                                     : tr("none (%1)").arg(prominence));
-
-    QString diagnosis = QStringLiteral("—");
-    if (clearLine && bearing) {
-        if (const auto match = sa::matchBearingFault(*bearing, frame.envelopePeakHz)) {
-            diagnosis = tr("%1 %2× (%3), %4 %")
-                            .arg(QString::fromUtf8(sa::shortName(match->fault)))
-                            .arg(match->harmonic)
-                            .arg(QString::fromUtf8(sa::description(match->fault)))
-                            .arg(QString::asprintf("%+.1f", match->errorPercent));
-        } else {
-            diagnosis = tr("no defect frequency matches");
-        }
-    }
-    bearingLabel_->setText(diagnosis);
-
     fatiguePanel_->showFrame(frame);
-    rateLabel_->setText(QStringLiteral("%1 Hz").arg(frame.sampleRate));
 }

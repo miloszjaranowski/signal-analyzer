@@ -1,14 +1,18 @@
 # Signal Analyzer
 
-Real-time vibration signal analyzer: a Python sensor simulator streams samples over UDP,
-a multithreaded C++20 pipeline computes the spectrum and signal metrics, and a Qt 6
-desktop app displays the waveform, FFT and a scrolling spectrogram live.
+Real-time vibration signal analyzer: a Python sensor simulator streams up to 8 channels
+of samples over UDP, a multithreaded C++20 pipeline computes the spectrum and signal
+metrics per channel, and a Qt 6 desktop app displays the waveform, FFT and a scrolling
+spectrogram live.
 
 <!-- TODO: add a GIF of the running app here -->
 
 ## Features
 
-- **Lock-free SPSC ring buffer** between the network and DSP threads (acquire/release
+- **Multi-channel streams:** up to 8 independent channels (own sequence numbers and
+  sample rate each), demultiplexed into per-channel ring buffers; the GUI shows all
+  channels in a table and plots the selected one
+- **Lock-free SPSC ring buffers** between the network and DSP threads (acquire/release
   atomics, cache-line separated counters, no allocation on the hot path)
 - **Two worker threads** (`std::jthread` + `std::stop_token`), UI decoupled at ~30 FPS
 - **Own radix-2 FFT**, Hann window with amplitude-correct scaling, sub-bin dominant
@@ -39,9 +43,9 @@ desktop app displays the waveform, FFT and a scrolling spectrogram live.
 flowchart LR
     SIM["Python simulator<br/>sensor_sim.py"] -- "UDP, SAP1 packets" --> RX
     subgraph core["sa_core (C++20, no Qt)"]
-        RX["Receive thread<br/>parse + sequence check"] --> RB[("SPSC lock-free<br/>ring buffer")]
-        RB --> DSP["DSP thread<br/>Hann + FFT + envelope + rainflow + metrics"]
-        DSP --> FR["recent AnalysisFrames<br/>(shared_ptr, last 64)"]
+        RX["Receive thread<br/>parse + per-channel sequence check"] --> RB[("SPSC lock-free<br/>ring buffer per channel")]
+        RB --> DSP["DSP thread, channels round-robin<br/>Hann + FFT + envelope + rainflow + metrics"]
+        DSP --> FR["recent AnalysisFrames per channel<br/>(shared_ptr, last 64)"]
     end
     FR --> GUI["Qt GUI<br/>QTimer 30 FPS"]
     FR --> CLI["sa_cli"]
@@ -51,15 +55,21 @@ The receive thread only parses and copies samples, so DSP work never delays read
 socket. If the consumer falls behind, the ring buffer reports dropped samples instead of
 blocking the producer.
 
+Each channel is an independent stream: a channel appears with its first valid packet and
+gets its own ring buffer (still one producer, one consumer), sequence tracking and
+analysis state. The DSP thread serves the channels round-robin, one chunk each per turn,
+so a busy channel cannot starve the others. A sensor that measures several axes sends one
+packet per axis.
+
 ### Wire format (little-endian)
 
 | Offset | Size | Field                            |
 |-------:|-----:|----------------------------------|
 | 0      | 4    | magic `0x31504153` ("SAP1")      |
-| 4      | 4    | sequence number                  |
+| 4      | 4    | sequence number (per channel)    |
 | 8      | 4    | sample rate [Hz]                 |
 | 12     | 2    | sample count N (≤ 4096)          |
-| 14     | 2    | channel (reserved, 0)            |
+| 14     | 2    | channel (0–7)                    |
 | 16     | 4·N  | float32 samples                  |
 
 ## Build
@@ -121,6 +131,8 @@ python simulator/sensor_sim.py --tones 120:1,240:0.3 --noise 0.1
 python simulator/sensor_sim.py --fault-hz 87 --fault-amp 2   # bearing-like impacts -> crest factor rises
 python simulator/sensor_sim.py --drop 0.02                   # 2 % packet loss -> visible in "Link"
 python simulator/sensor_sim.py --offset 0.5                  # static load -> cycles get a mean
+python simulator/sensor_sim.py --channels 3 --gains 1,0.5,0.25 --fault-hz 177.5 \
+       --fault-amp 0.3 --fault-channel 1                     # 3 channels, bearing fault on ch 1
 python simulator/sensor_sim.py --help
 ```
 
@@ -261,7 +273,7 @@ simulator/ Python UDP sensor simulator
 - [x] Bearing fault frequency calculator (BPFO/BPFI/BSF/FTF from geometry and shaft speed)
 - [x] Rainflow cycle counting and fatigue damage estimate (Miner's rule)
 - [x] Fatigue refinements: endurance limit / two-slope S-N curve, mean-stress correction
-- [ ] Multi-channel streams
+- [x] Multi-channel streams
 - [ ] Recording to file / replay (CSV, HDF5)
 - [ ] ESP32 + MEMS accelerometer as a real sensor
 - [ ] Benchmark: sustained sample rate vs. FFT size

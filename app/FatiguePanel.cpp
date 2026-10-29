@@ -89,8 +89,8 @@ FatiguePanel::FatiguePanel(QWidget* parent) : QWidget(parent) {
     bold.setBold(true);
     lifeLabel_->setFont(bold);
 
-    auto* resultBox = new QGroupBox(tr("Palmgren-Miner"));
-    auto* results = new QFormLayout(resultBox);
+    resultBox_ = new QGroupBox(tr("Palmgren-Miner"));
+    auto* results = new QFormLayout(resultBox_);
     results->addRow(tr("Signal time:"), timeLabel_);
     results->addRow(tr("Rainflow cycles:"), cyclesLabel_);
     results->addRow(tr("Max stress range:"), maxRangeLabel_);
@@ -109,7 +109,7 @@ FatiguePanel::FatiguePanel(QWidget* parent) : QWidget(parent) {
     auto* layout = new QVBoxLayout(this);
     layout->addWidget(curveBox);
     layout->addWidget(meanBox);
-    layout->addWidget(resultBox);
+    layout->addWidget(resultBox_);
     layout->addWidget(damagePlot_, 1);
 
     for (QDoubleSpinBox* spin : {scaleSpin_, slopeSpin_, refRangeSpin_, refCyclesSpin_,
@@ -163,6 +163,20 @@ void FatiguePanel::updateInputs() {
     emit changed();
 }
 
+QString FatiguePanel::lifeText(const sa::AnalysisFrame& frame) const {
+    const sa::SnCurve curve = snCurve();
+    return lifeText(sa::minerDamage(frame.rainflow, curve, meanStressCorrection(), scaleSpin_->value()),
+                    frame, curve);
+}
+
+QString FatiguePanel::lifeText(double damage, const sa::AnalysisFrame& frame, const sa::SnCurve& curve) {
+    if (damage > 0.0 && frame.fatigueSeconds > 0.0) {
+        return QString::fromStdString(sa::formatDuration(frame.fatigueSeconds / damage));
+    }
+    const bool belowLimit = frame.rainflow.totalCycles() > 0.0 && sa::cutoffRange(curve) > 0.0;
+    return belowLimit ? tr("unlimited") : QStringLiteral("—");
+}
+
 void FatiguePanel::showFrame(const sa::AnalysisFrame& frame) {
     const sa::RainflowMatrix& matrix = frame.rainflow;
     const sa::SnCurve curve = snCurve();
@@ -170,18 +184,18 @@ void FatiguePanel::showFrame(const sa::AnalysisFrame& frame) {
     const std::vector<double> perRange = sa::damageByRange(matrix, curve, meanStressCorrection(), scale);
     const double damage = std::accumulate(perRange.begin(), perRange.end(), 0.0);
 
+    resultBox_->setTitle(tr("Palmgren-Miner, channel %1").arg(frame.channel));
     timeLabel_->setText(QString::fromStdString(sa::formatDuration(frame.fatigueSeconds)));
     cyclesLabel_->setText(QString::number(matrix.totalCycles(), 'f', 0));
     maxRangeLabel_->setText(QStringLiteral("%1 MPa").arg(matrix.maxRange() * scale, 0, 'g', 4));
+    lifeLabel_->setText(lifeText(damage, frame, curve));
     if (damage > 0.0 && frame.fatigueSeconds > 0.0) {
         damageLabel_->setText(QString::number(damage, 'g', 3));
         rateLabel_->setText(QString::number(damage / frame.fatigueSeconds * 3600.0, 'g', 3));
-        lifeLabel_->setText(QString::fromStdString(sa::formatDuration(frame.fatigueSeconds / damage)));
     } else {
         const bool belowLimit = matrix.totalCycles() > 0.0 && sa::cutoffRange(curve) > 0.0;
         damageLabel_->setText(belowLimit ? tr("0 (all ranges below the limit)") : QStringLiteral("0"));
         rateLabel_->setText(QStringLiteral("—"));
-        lifeLabel_->setText(belowLimit ? tr("unlimited") : QStringLiteral("—"));
     }
 
     // Share of the total damage per range bin, up to the largest range seen, with

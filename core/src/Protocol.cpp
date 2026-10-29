@@ -33,7 +33,7 @@ bool parsePacket(std::span<const std::byte> data, PacketHeader& header,
     header.channel = readAt<std::uint16_t>(data, 14);
 
     if (header.magic != kMagic || header.sampleRate == 0 ||
-        header.sampleCount > kMaxSamplesPerPacket) {
+        header.sampleCount > kMaxSamplesPerPacket || header.channel >= kMaxChannels) {
         return false;
     }
 

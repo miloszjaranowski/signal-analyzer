@@ -11,6 +11,7 @@ struct AnalysisFrame;
 class PlotWidget;
 class QComboBox;
 class QDoubleSpinBox;
+class QGroupBox;
 class QLabel;
 
 // Rainflow + Palmgren-Miner: stress calibration, S-N curve and mean-stress
@@ -24,6 +25,8 @@ public:
     explicit FatiguePanel(QWidget* parent = nullptr);
 
     void showFrame(const sa::AnalysisFrame& frame);
+    // Estimated life of any channel's frame with the current settings, e.g. "3 days".
+    QString lifeText(const sa::AnalysisFrame& frame) const;
 
 signals:
     void changed();
@@ -33,6 +36,7 @@ private:
     sa::SnCurve snCurve() const;
     sa::MeanStressCorrection meanStressCorrection() const;
     void updateInputs();  // enables the fields the chosen models use, shows derived limits
+    static QString lifeText(double damage, const sa::AnalysisFrame& frame, const sa::SnCurve& curve);
 
     QDoubleSpinBox* scaleSpin_ = nullptr;
     QComboBox* shapeCombo_ = nullptr;
@@ -46,6 +50,7 @@ private:
     QComboBox* meanCombo_ = nullptr;
     QDoubleSpinBox* strengthSpin_ = nullptr;
 
+    QGroupBox* resultBox_ = nullptr;
     QLabel* timeLabel_ = nullptr;
     QLabel* cyclesLabel_ = nullptr;
     QLabel* maxRangeLabel_ = nullptr;
