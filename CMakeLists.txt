@@ -36,6 +36,7 @@ find_package(Threads REQUIRED)
 # ---------------------------------------------------------------------------
 add_library(sa_core
   core/src/Bearing.cpp
+  core/src/Capture.cpp
   core/src/Protocol.cpp
   core/src/Dsp.cpp
   core/src/Fatigue.cpp
@@ -102,6 +103,7 @@ if(SA_BUILD_TESTS)
   enable_testing()
   add_executable(sa_tests
     tests/test_bearing.cpp
+    tests/test_capture.cpp
     tests/test_fatigue.cpp
     tests/test_ring_buffer.cpp
     tests/test_dsp.cpp

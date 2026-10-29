@@ -28,15 +28,19 @@ public:
     explicit MainWindow(QWidget* parent = nullptr);
     ~MainWindow() override;
 
+    void replay(const QString& captureFile) { startPipeline(captureFile); }
+
 private slots:
     void toggleAcquisition();
     void refresh();
     void updateSpectrumScale();
     void applyEnvelopeBand();
     void selectChannel(std::uint16_t channel);
+    void toggleRecording(bool on);
+    void openRecording();
 
 private:
-    void startPipeline();
+    void startPipeline(const QString& replayFile = {});  // empty: live UDP
     void stopPipeline();
     void setControlsRunning(bool running);
     void showFrame(const sa::AnalysisFrame& frame);  // plots and panels: the selected channel
@@ -58,6 +62,11 @@ private:
     QCheckBox* dbCheck_ = nullptr;
     QDoubleSpinBox* maxFreqSpin_ = nullptr;
     QPushButton* startButton_ = nullptr;
+    QPushButton* recordButton_ = nullptr;
+    QPushButton* openButton_ = nullptr;
+    QComboBox* speedCombo_ = nullptr;
+    QString recordPath_;
+    QString replayFile_;
     QDoubleSpinBox* envLoSpin_ = nullptr;
     QDoubleSpinBox* envHiSpin_ = nullptr;
     QDoubleSpinBox* envMaxFreqSpin_ = nullptr;

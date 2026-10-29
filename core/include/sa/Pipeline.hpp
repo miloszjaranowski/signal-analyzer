@@ -2,17 +2,20 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <stop_token>
 #include <string>
 #include <thread>
 #include <vector>
 
+#include "sa/Capture.hpp"
 #include "sa/Fatigue.hpp"
 #include "sa/Protocol.hpp"
 #include "sa/SpscRingBuffer.hpp"
@@ -30,6 +33,19 @@ struct PipelineConfig {
     std::size_t frameHistory = 64;           // recent frames per channel kept for framesSince()
     float envelopeBandLoHz = 1000.0f;        // band-pass before envelope detection,
     float envelopeBandHiHz = 4000.0f;        // ideally around a structural resonance
+
+    // Non-empty: read datagrams from this capture file (.sacap) instead of UDP.
+    // The pipeline stops by itself (running() turns false) once the file is
+    // played and every frame computed.
+    std::string replayFile;
+    double replaySpeed = 1.0;                // 1 = recorded pace, 2 = twice as fast, 0 = no pacing
+};
+
+struct RecordingStatus {
+    bool active = false;
+    std::uint64_t packets = 0;
+    std::uint64_t bytes = 0;
+    std::string error;  // set if writing failed; recording has then stopped
 };
 
 // One analysis result of one channel. Immutable once published; shared with the
@@ -98,9 +114,21 @@ public:
     Pipeline(const Pipeline&) = delete;
     Pipeline& operator=(const Pipeline&) = delete;
 
-    void start();  // throws std::runtime_error if the socket cannot be opened
+    void start();  // throws std::runtime_error if the socket or capture file cannot be opened
     void stop();   // idempotent; joins both threads
     bool running() const { return running_.load(); }
+
+    bool replaying() const { return !config_.replayFile.empty(); }
+    double replayProgress() const { return replayProgress_.load(); }  // 0..1
+
+    // Thread-safe. Records every received datagram to a capture file (.sacap)
+    // until stopRecording(), stop() or destruction. Throws std::runtime_error if
+    // the file cannot be created; replaces a recording already in progress.
+    void startRecording(const std::string& path);
+    void stopRecording();  // flushes and closes; no-op when not recording
+    // While recording: the running totals. Afterwards: the final totals of the
+    // last recording (active = false).
+    RecordingStatus recordingStatus() const;
 
     std::uint16_t port() const;
     const PipelineConfig& config() const { return config_; }
@@ -142,6 +170,12 @@ private:
     struct ChannelAnalysis;  // DSP-thread state of one channel, see Pipeline.cpp
 
     void receiveLoop(std::stop_token stop);
+    // Next datagram from the socket or the capture; 0 on a timeout, nullopt when
+    // a capture has ended (or a stop was requested while pacing).
+    std::optional<std::size_t> nextDatagram(std::span<std::byte> buffer, const std::stop_token& stop);
+    void handleDatagram(std::span<const std::byte> datagram, std::vector<float>& samples,
+                        const std::stop_token& stop);
+    void record(std::span<const std::byte> datagram);
     void dspLoop(std::stop_token stop);
     void analyse(ChannelAnalysis& analysis, Channel& channel, std::span<const float> chunk,
                  float bandLo, float bandHi);
@@ -150,7 +184,19 @@ private:
     void setError(const std::string& message);
 
     PipelineConfig config_;
-    std::unique_ptr<UdpReceiver> receiver_;
+    std::unique_ptr<UdpReceiver> receiver_;  // live source
+    std::unique_ptr<CaptureReader> replay_;  // replay source (receive thread only once started)
+    std::chrono::steady_clock::time_point replayStart_;
+    std::uint64_t replayFirstUs_ = 0;
+    bool replayStarted_ = false;
+    std::atomic<double> replayProgress_{0.0};
+    std::atomic<bool> sourceExhausted_{false};  // replay: the receive thread has pushed everything
+
+    mutable std::mutex recordMutex_;  // guards the recording; uncontended on the hot path
+    std::unique_ptr<CaptureWriter> recorder_;
+    std::chrono::steady_clock::time_point recordStart_;
+    std::string recordError_;
+    RecordingStatus finishedRecording_;  // totals of the last stopped recording
 
     std::array<std::unique_ptr<Channel>, kMaxChannels> ownedChannels_;  // receive thread writes
     std::array<std::atomic<Channel*>, kMaxChannels> published_{};       // everyone reads

@@ -33,6 +33,9 @@ spectrogram live.
 - **Qt 6 GUI** with a custom `QPainter` plot (min/max decimation per pixel, no QtCharts)
 - **Spectrogram (waterfall)** aligned with the spectrum plot: every analysis frame becomes
   a row (no frames skipped by the 30 FPS UI), rendered once into a ring of image lines
+- **Recording and replay:** lossless capture of every received packet (`.sacap`), replay
+  in the app at the recorded pace or as fast as possible, conversion to and from CSV and
+  HDF5 (`tools/sacap.py`)
 - **Headless CLI** (`sa_cli`) running the same pipeline
 - **Tests:** GoogleTest unit + loopback integration tests, run under ThreadSanitizer
   and AddressSanitizer in CI on Linux and Windows
@@ -135,6 +138,42 @@ python simulator/sensor_sim.py --channels 3 --gains 1,0.5,0.25 --fault-hz 177.5 
        --fault-amp 0.3 --fault-channel 1                     # 3 channels, bearing fault on ch 1
 python simulator/sensor_sim.py --help
 ```
+
+### Recording and replay
+
+Every received datagram can be recorded, byte for byte with its arrival time, to a
+capture file (`.sacap`, format in `core/include/sa/Capture.hpp`). Replaying it feeds the
+same analysis exactly the packets it saw, lost and malformed ones included, at the
+recorded pace, faster, or as fast as possible (offline analysis). A replay never drops
+samples: the receive thread waits for room in the ring buffers instead, which live data
+cannot afford to do.
+
+- **GUI:** *Record…* while running live; *Open recording…* with a speed (1×–10×, Max).
+  `signal_analyzer run.sacap` replays a file straight away.
+- **CLI:** `--record run.sacap` while listening, `--replay run.sacap [--speed 0]`; a
+  replay ends by itself and prints the final state of every channel.
+
+```bash
+python simulator/sensor_sim.py --channels 2 --drop 0.05 &
+./build/sa_cli --record run.sacap --seconds 10
+./build/sa_cli --replay run.sacap --speed 0          # 10 s of data analysed in well under a second
+```
+
+`tools/sacap.py` (numpy; h5py for HDF5) turns captures into CSV or HDF5 for Python,
+MATLAB or Excel, and back into captures, so data from elsewhere can be replayed too:
+
+```bash
+pip install -r tools/requirements.txt
+python tools/sacap.py info      run.sacap            # channels, packets, losses, RMS
+python tools/sacap.py to-csv    run.sacap run.csv    # channel,sample_rate,time_s,value
+python tools/sacap.py to-hdf5   run.sacap run.h5     # /channel_<n>/samples, time_s; sample_rate attribute
+python tools/sacap.py from-hdf5 run.h5 back.sacap    # also from-csv; --block = samples per packet
+```
+
+Sample times come from the sequence numbers, so lost packets stay visible as gaps in
+`time_s` and survive the round trip: replaying `back.sacap` gives the same analysis as
+the original (CI checks this). Only `.sacap` is fully lossless, though: arrival times
+become regular and malformed datagrams are dropped in CSV / HDF5.
 
 ### Envelope analysis
 
@@ -258,12 +297,13 @@ python simulator/sensor_sim.py --tones 50:1 --noise 0 --offset 0.5
 
 ```
 core/      sa_core library: Protocol, SpscRingBuffer, Dsp (FFT, envelope), Bearing, Fatigue,
-           Udp, Pipeline
-app/       Qt 6 GUI: MainWindow, PlotWidget, SpectrogramWidget, BearingPanel, FatiguePanel,
-           PlotFrame (shared axes)
+           Capture (record / replay), Udp, Pipeline
+app/       Qt 6 GUI: MainWindow, PlotWidget, SpectrogramWidget, ChannelTable, BearingPanel,
+           FatiguePanel, PlotFrame (shared axes)
 cli/       headless front-end
 tests/     GoogleTest unit and integration tests
 simulator/ Python UDP sensor simulator
+tools/     sacap.py: capture files to / from CSV and HDF5
 ```
 
 ## Roadmap
@@ -274,6 +314,6 @@ simulator/ Python UDP sensor simulator
 - [x] Rainflow cycle counting and fatigue damage estimate (Miner's rule)
 - [x] Fatigue refinements: endurance limit / two-slope S-N curve, mean-stress correction
 - [x] Multi-channel streams
-- [ ] Recording to file / replay (CSV, HDF5)
+- [x] Recording to file / replay (CSV, HDF5)
 - [ ] ESP32 + MEMS accelerometer as a real sensor
 - [ ] Benchmark: sustained sample rate vs. FFT size

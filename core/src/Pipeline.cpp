@@ -76,10 +76,17 @@ void Pipeline::setEnvelopeBand(float loHz, float hiHz) {
 Pipeline::~Pipeline() { stop(); }
 
 void Pipeline::start() {
-    if (receiver_) {
+    if (receiver_ || replay_) {
         throw std::logic_error("Pipeline can only be started once; create a new instance");
     }
-    receiver_ = std::make_unique<UdpReceiver>(config_.port);
+    if (replaying()) {
+        if (!(config_.replaySpeed >= 0.0)) {
+            throw std::invalid_argument("replaySpeed must be >= 0");
+        }
+        replay_ = std::make_unique<CaptureReader>(config_.replayFile);
+    } else {
+        receiver_ = std::make_unique<UdpReceiver>(config_.port);
+    }
     running_ = true;
     dspThread_ = std::jthread([this](std::stop_token st) { dspLoop(st); });
     receiveThread_ = std::jthread([this](std::stop_token st) { receiveLoop(st); });
@@ -95,6 +102,59 @@ void Pipeline::stop() {
         dspThread_.join();
     }
     running_ = false;
+    stopRecording();
+}
+
+void Pipeline::startRecording(const std::string& path) {
+    auto writer = std::make_unique<CaptureWriter>(path);  // may throw; nothing changed yet
+    std::unique_ptr<CaptureWriter> previous;
+    {
+        std::lock_guard lock(recordMutex_);
+        previous = std::move(recorder_);
+        recorder_ = std::move(writer);
+        recordStart_ = std::chrono::steady_clock::now();
+        recordError_.clear();
+        finishedRecording_ = {};
+    }
+    // `previous` flushes and closes here, outside the lock.
+}
+
+void Pipeline::stopRecording() {
+    std::unique_ptr<CaptureWriter> finished;
+    {
+        std::lock_guard lock(recordMutex_);
+        finished = std::move(recorder_);
+        if (finished) {
+            finishedRecording_ = {false, finished->records(), finished->bytes(), {}};
+        }
+    }
+    if (finished) {
+        finished->flush();
+    }
+}
+
+RecordingStatus Pipeline::recordingStatus() const {
+    std::lock_guard lock(recordMutex_);
+    RecordingStatus s = finishedRecording_;  // the last recording's totals once it has stopped
+    if (recorder_) {
+        s = {true, recorder_->records(), recorder_->bytes(), {}};
+    }
+    s.error = recordError_;
+    return s;
+}
+
+void Pipeline::record(std::span<const std::byte> datagram) {
+    std::lock_guard lock(recordMutex_);
+    if (!recorder_) {
+        return;
+    }
+    const auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - recordStart_);
+    if (!recorder_->write(static_cast<std::uint64_t>(us.count()), datagram)) {
+        recordError_ = "Recording stopped: writing the capture file failed (disk full?)";
+        finishedRecording_ = {false, recorder_->records(), recorder_->bytes(), {}};
+        recorder_.reset();
+    }
 }
 
 std::uint16_t Pipeline::port() const { return receiver_ ? receiver_->port() : config_.port; }
@@ -181,43 +241,101 @@ void Pipeline::setError(const std::string& message) {
 }
 
 void Pipeline::receiveLoop(std::stop_token stop) {
-    std::vector<std::byte> datagram(65536);
-    std::vector<float> samples;
+    std::vector<std::byte> datagram(kMaxCaptureDatagram);
+    std::vector<float> samples;  // reused for every packet: no allocation on the hot path
     samples.reserve(kMaxSamplesPerPacket);
-    PacketHeader header;
 
     try {
         while (!stop.stop_requested()) {
-            const std::size_t n = receiver_->receive(datagram, 100ms);
-            if (n == 0) {
-                continue;
+            const auto n = nextDatagram(datagram, stop);
+            if (!n) {
+                break;  // the capture has ended
             }
-            if (!parsePacket(std::span(datagram.data(), n), header, samples)) {
-                ++packetsMalformed_;
-                continue;
+            if (*n > 0) {
+                handleDatagram(std::span<const std::byte>(datagram.data(), *n), samples, stop);
             }
-            Channel& ch = channelForPacket(header.channel);
-
-            if (ch.haveSequence && header.sequence != ch.expectedSequence) {
-                // Forward gap = lost packets. A large "negative" jump means the
-                // sender restarted, which is not a loss.
-                const std::uint32_t gap = header.sequence - ch.expectedSequence;
-                if (gap < 0x8000'0000u) {
-                    ch.packetsLost += gap;
-                }
-            }
-            ch.haveSequence = true;
-            ch.expectedSequence = header.sequence + 1;
-
-            ch.sampleRate.store(header.sampleRate, std::memory_order_relaxed);
-            const std::size_t pushed = ch.ring.push(samples);
-            ch.samplesDropped += samples.size() - pushed;
-            ++ch.packetsReceived;
         }
     } catch (const std::exception& e) {
         setError(std::string("Receive thread stopped: ") + e.what());
         running_ = false;
     }
+    // Release: the DSP thread, seeing this, also sees every sample pushed before.
+    sourceExhausted_.store(true, std::memory_order_release);
+}
+
+std::optional<std::size_t> Pipeline::nextDatagram(std::span<std::byte> buffer,
+                                                  const std::stop_token& stop) {
+    if (!replay_) {
+        return receiver_->receive(buffer, 100ms);  // 0 on timeout: lets the loop see a stop
+    }
+
+    CaptureRecord rec;
+    if (!replay_->next(rec)) {
+        replayProgress_ = 1.0;
+        return std::nullopt;
+    }
+    replayProgress_ = replay_->progress();
+    if (config_.replaySpeed > 0.0) {
+        // Reproduce the recorded timing, relative to the first record.
+        if (!replayStarted_) {
+            replayStarted_ = true;
+            replayStart_ = std::chrono::steady_clock::now();
+            replayFirstUs_ = rec.timestampUs;
+        }
+        const double offsetSeconds =
+            static_cast<double>(rec.timestampUs - std::min(rec.timestampUs, replayFirstUs_)) * 1e-6 /
+            config_.replaySpeed;
+        const auto due = replayStart_ + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                                            std::chrono::duration<double>(offsetSeconds));
+        while (!stop.stop_requested()) {
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= due) {
+                break;
+            }
+            std::this_thread::sleep_for(std::min<std::chrono::steady_clock::duration>(due - now, 50ms));
+        }
+        if (stop.stop_requested()) {
+            return std::nullopt;
+        }
+    }
+    std::copy(rec.datagram.begin(), rec.datagram.end(), buffer.begin());
+    return rec.datagram.size();
+}
+
+void Pipeline::handleDatagram(std::span<const std::byte> datagram, std::vector<float>& samples,
+                              const std::stop_token& stop) {
+    PacketHeader header;
+
+    record(datagram);  // everything as received, malformed packets included
+    if (!parsePacket(datagram, header, samples)) {
+        ++packetsMalformed_;
+        return;
+    }
+    Channel& ch = channelForPacket(header.channel);
+
+    if (ch.haveSequence && header.sequence != ch.expectedSequence) {
+        // Forward gap = lost packets. A large "negative" jump means the
+        // sender restarted, which is not a loss.
+        const std::uint32_t gap = header.sequence - ch.expectedSequence;
+        if (gap < 0x8000'0000u) {
+            ch.packetsLost += gap;
+        }
+    }
+    ch.haveSequence = true;
+    ch.expectedSequence = header.sequence + 1;
+    ch.sampleRate.store(header.sampleRate, std::memory_order_relaxed);
+
+    std::size_t pushed = ch.ring.push(samples);
+    if (replay_) {
+        // A file can be read faster than it is analysed: wait for room instead of
+        // dropping samples, which live data cannot afford to do.
+        while (pushed < samples.size() && !stop.stop_requested()) {
+            std::this_thread::sleep_for(1ms);
+            pushed += ch.ring.push(std::span<const float>(samples).subspan(pushed));
+        }
+    }
+    ch.samplesDropped += samples.size() - pushed;
+    ++ch.packetsReceived;
 }
 
 void Pipeline::dspLoop(std::stop_token stop) {
@@ -225,6 +343,9 @@ void Pipeline::dspLoop(std::stop_token stop) {
     std::vector<float> chunk(kChunkSamples);
 
     while (!stop.stop_requested()) {
+        // Read before draining the rings: if the replay had already ended and this
+        // turn finds them all empty, no sample is left anywhere.
+        const bool sourceDone = sourceExhausted_.load(std::memory_order_acquire);
         const bool resetFatigue = fatigueResetRequested_.exchange(false);
         float bandLo = 0.0f;
         float bandHi = 0.0f;
@@ -254,6 +375,10 @@ void Pipeline::dspLoop(std::stop_token stop) {
                 anyData = true;
                 analyse(*analysis, *ch, std::span<const float>(chunk.data(), n), bandLo, bandHi);
             }
+        }
+        if (!anyData && sourceDone && replaying()) {
+            running_ = false;  // replay finished and fully analysed
+            return;
         }
         if (!anyData) {
             // Polling keeps the producer path lock- and syscall-free.

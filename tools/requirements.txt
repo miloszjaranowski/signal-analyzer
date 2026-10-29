@@ -1,0 +1,2 @@
+numpy>=1.24
+h5py>=3.8  # only for to-hdf5 / from-hdf5

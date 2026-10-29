@@ -4,7 +4,8 @@
 //
 //   sa_cli [--port 5005] [--fft 4096] [--env-band 1000:4000]
 //          [--rpm 3000 [--bearing 9:7.94:39.04:0]] [--stress-scale 1]
-//          [--sn 3:90:2e6:5e6:5:1e8] [--mean-stress none] [--seconds 0]
+//          [--sn 3:90:2e6:5e6:5:1e8] [--mean-stress none]
+//          [--record run.sacap] [--replay run.sacap [--speed 1]] [--seconds 0]
 
 #include <chrono>
 #include <cstdio>
@@ -27,7 +28,8 @@ namespace {
 void printUsage() {
     std::cout << "Usage: sa_cli [--port N] [--fft N] [--env-band LO:HI] [--rpm R [--bearing N:d:D[:angle]]]\n"
                  "              [--stress-scale K] [--sn m:RANGE:CYCLES[:KNEE[:m2:CUTOFF]]]\n"
-                 "              [--mean-stress none|goodman:RM|gerber:RM] [--seconds N]\n"
+                 "              [--mean-stress none|goodman:RM|gerber:RM]\n"
+                 "              [--record FILE.sacap] [--replay FILE.sacap [--speed X]] [--seconds N]\n"
                  "  --port      UDP port to listen on (default 5005)\n"
                  "  --fft       FFT size, power of two (default 4096)\n"
                  "  --env-band  band-pass for envelope analysis in Hz (default 1000:4000)\n"
@@ -41,7 +43,11 @@ void printUsage() {
                  "              (default 3:90:2e6:5e6:5:1e8, EN 1993-1-9 detail category 90)\n"
                  "  --mean-stress  mean-stress correction with ultimate strength RM\n"
                  "              (default none, as for welded joints)\n"
-                 "  --seconds   stop after N seconds, 0 = run until Ctrl+C (default 0)\n";
+                 "  --record    save every received datagram to a capture file\n"
+                 "  --replay    analyse a capture file instead of listening on UDP; ends with it\n"
+                 "  --speed     replay pace: 1 = as recorded (default), 2 = twice as fast,\n"
+                 "              0 = as fast as possible\n"
+                 "  --seconds   stop after N seconds, 0 = run until Ctrl+C or the replay ends\n";
 }
 
 // "1:2.5:3" -> {1, 2.5, 3}. Throws std::invalid_argument on a malformed number.
@@ -117,6 +123,7 @@ int main(int argc, char** argv) {
     sa::SnCurve snCurve;
     sa::MeanStressCorrection meanStress;
     double stressScale = 1.0;
+    std::string recordPath;
     int seconds = 0;
 
     try {
@@ -152,6 +159,12 @@ int main(int argc, char** argv) {
                 snCurve = parseSnCurve(argv[++i]);
             } else if (arg == "--mean-stress" && hasValue) {
                 meanStress = parseMeanStress(argv[++i]);
+            } else if (arg == "--record" && hasValue) {
+                recordPath = argv[++i];
+            } else if (arg == "--replay" && hasValue) {
+                config.replayFile = argv[++i];
+            } else if (arg == "--speed" && hasValue) {
+                config.replaySpeed = std::stod(argv[++i]);
             } else if (arg == "--seconds" && hasValue) {
                 seconds = std::stoi(argv[++i]);
             } else {
@@ -179,14 +192,22 @@ int main(int argc, char** argv) {
 
         sa::Pipeline pipeline(config);
         pipeline.start();
-        std::cout << "Listening on UDP port " << pipeline.port() << ", FFT size "
-                  << config.fftSize << ". Waiting for data...\n";
+        if (pipeline.replaying()) {
+            std::cout << "Replaying " << config.replayFile << " at "
+                      << (config.replaySpeed > 0.0 ? std::to_string(config.replaySpeed) + "x"
+                                                   : std::string("full speed"))
+                      << ", FFT size " << config.fftSize << ".\n";
+        } else {
+            std::cout << "Listening on UDP port " << pipeline.port() << ", FFT size "
+                      << config.fftSize << ". Waiting for data...\n";
+        }
+        if (!recordPath.empty()) {
+            pipeline.startRecording(recordPath);
+            std::cout << "Recording to " << recordPath << '\n';
+        }
 
-        const auto startTime = std::chrono::steady_clock::now();
-        while (pipeline.running()) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
-
-            // One line per channel, in channel order.
+        // One line per channel, in channel order.
+        const auto printChannels = [&] {
             const auto stats = pipeline.stats();
             for (const sa::ChannelStats& cs : stats.channels) {
                 const auto frame = pipeline.latestFrame(cs.channel);
@@ -215,14 +236,37 @@ int main(int argc, char** argv) {
                     static_cast<unsigned long long>(cs.samplesDropped), cs.bufferFill);
             }
             std::fflush(stdout);
+        };
 
-            const auto elapsed = std::chrono::steady_clock::now() - startTime;
-            if (seconds > 0 && elapsed >= std::chrono::seconds(seconds)) {
+        // Short sleeps so that a fast replay ends promptly; print twice a second.
+        const auto startTime = std::chrono::steady_clock::now();
+        auto lastPrint = startTime;
+        while (pipeline.running()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            const auto now = std::chrono::steady_clock::now();
+            if (now - lastPrint >= std::chrono::milliseconds(500)) {
+                printChannels();
+                lastPrint = now;
+            }
+            if (seconds > 0 && now - startTime >= std::chrono::seconds(seconds)) {
                 break;
             }
         }
+        if (pipeline.replaying()) {
+            printChannels();  // the state at the end of the recording
+        }
 
-        pipeline.stop();
+        pipeline.stop();  // also ends the recording; its final totals stay readable
+        const auto recording = pipeline.recordingStatus();
+        if (!recordPath.empty()) {
+            std::printf("Recorded %llu packets (%.1f kB) to %s\n",
+                        static_cast<unsigned long long>(recording.packets),
+                        static_cast<double>(recording.bytes) / 1024.0, recordPath.c_str());
+        }
+        if (!recording.error.empty()) {
+            std::cerr << recording.error << '\n';
+            return EXIT_FAILURE;
+        }
         if (const auto err = pipeline.lastError(); !err.empty()) {
             std::cerr << err << '\n';
             return EXIT_FAILURE;

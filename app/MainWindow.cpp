@@ -3,18 +3,25 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDockWidget>
+#include <QDateTime>
+#include <QDir>
 #include <QDoubleSpinBox>
+#include <QFileDialog>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QSignalBlocker>
 #include <QSpinBox>
+#include <QStandardPaths>
 #include <QStatusBar>
 #include <QTimer>
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <stdexcept>
+#include <utility>
 
 #include "BearingPanel.hpp"
 #include "ChannelTable.hpp"
@@ -71,6 +78,23 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     startButton_->setDefault(true);
     connect(startButton_, &QPushButton::clicked, this, &MainWindow::toggleAcquisition);
 
+    // Recording (live only) and replay of capture files (.sacap).
+    recordButton_ = new QPushButton(tr("Record…"));
+    recordButton_->setCheckable(true);
+    recordButton_->setEnabled(false);
+    recordButton_->setToolTip(tr("Save every received packet to a capture file (.sacap)"));
+    connect(recordButton_, &QPushButton::toggled, this, &MainWindow::toggleRecording);
+
+    openButton_ = new QPushButton(tr("Open recording…"));
+    openButton_->setToolTip(tr("Replay a capture file through the same analysis as live data"));
+    connect(openButton_, &QPushButton::clicked, this, &MainWindow::openRecording);
+    speedCombo_ = new QComboBox;
+    for (const auto& [label, speed] : {std::pair{"1×", 1.0}, {"2×", 2.0}, {"5×", 5.0}, {"10×", 10.0},
+                                       {"Max", 0.0}}) {
+        speedCombo_->addItem(QString::fromUtf8(label), speed);
+    }
+    speedCombo_->setToolTip(tr("Replay speed; Max analyses the file as fast as possible"));
+
     dbCheck_ = new QCheckBox(tr("Spectrum in dB"));
     dbCheck_->setChecked(true);
     connect(dbCheck_, &QCheckBox::toggled, this, &MainWindow::updateSpectrumScale);
@@ -100,6 +124,10 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     controls->addSpacing(12);
     controls->addWidget(dbCheck_);
     controls->addStretch();
+    controls->addWidget(openButton_);
+    controls->addWidget(speedCombo_);
+    controls->addSpacing(12);
+    controls->addWidget(recordButton_);
     controls->addWidget(startButton_);
 
     // --- Envelope analysis controls (the band can be tuned while running) ------
@@ -207,13 +235,16 @@ void MainWindow::toggleAcquisition() {
     }
 }
 
-void MainWindow::startPipeline() {
+void MainWindow::startPipeline(const QString& replayFile) {
     sa::PipelineConfig cfg;
     cfg.port = static_cast<std::uint16_t>(portSpin_->value());
     cfg.fftSize = static_cast<std::size_t>(fftCombo_->currentData().toInt());
     cfg.hopSize = cfg.fftSize / 4;  // 75 % overlap
     cfg.envelopeBandLoHz = static_cast<float>(envLoSpin_->value());
     cfg.envelopeBandHiHz = static_cast<float>(envHiSpin_->value());
+    cfg.replayFile = replayFile.toStdString();
+    cfg.replaySpeed = speedCombo_->currentData().toDouble();
+    replayFile_ = replayFile;
 
     try {
         auto pipeline = std::make_unique<sa::Pipeline>(cfg);
@@ -231,20 +262,31 @@ void MainWindow::startPipeline() {
     spectrogram_->clear();
     setControlsRunning(true);
     refreshTimer_->start();
-    statusBar()->showMessage(tr("Listening on UDP port %1...").arg(pipeline_->port()));
+    statusBar()->showMessage(replayFile.isEmpty()
+                                 ? tr("Listening on UDP port %1...").arg(pipeline_->port())
+                                 : tr("Replaying %1...").arg(replayFile));
 }
 
 void MainWindow::stopPipeline() {
     if (refreshTimer_) {
         refreshTimer_->stop();
     }
+    QString message = tr("Stopped.");
     if (pipeline_) {
-        pipeline_->stop();
+        pipeline_->stop();  // also ends a recording; its totals stay readable
+        const auto recording = pipeline_->recordingStatus();
+        if (!recordPath_.isEmpty() && recording.packets > 0) {
+            message = tr("Stopped. Recorded %1 packets (%2 kB) to %3.")
+                          .arg(qulonglong(recording.packets))
+                          .arg(double(recording.bytes) / 1024.0, 0, 'f', 0)
+                          .arg(recordPath_);
+        }
         pipeline_.reset();
     }
+    recordPath_.clear();
     if (startButton_) {
         setControlsRunning(false);
-        statusBar()->showMessage(tr("Stopped."));
+        statusBar()->showMessage(message);
     }
 }
 
@@ -252,6 +294,58 @@ void MainWindow::setControlsRunning(bool running) {
     startButton_->setText(running ? tr("Stop") : tr("Start"));
     portSpin_->setEnabled(!running);
     fftCombo_->setEnabled(!running);
+    openButton_->setEnabled(!running);
+    speedCombo_->setEnabled(!running);
+    const QSignalBlocker blocker(recordButton_);  // reflect state, do not start/stop anything
+    recordButton_->setChecked(running && !recordPath_.isEmpty());
+    recordButton_->setEnabled(running && replayFile_.isEmpty());
+}
+
+void MainWindow::toggleRecording(bool on) {
+    if (!pipeline_) {
+        return;
+    }
+    if (!on) {
+        pipeline_->stopRecording();
+        const auto recording = pipeline_->recordingStatus();
+        statusBar()->showMessage(tr("Recorded %1 packets (%2 kB) to %3.")
+                                     .arg(qulonglong(recording.packets))
+                                     .arg(double(recording.bytes) / 1024.0, 0, 'f', 0)
+                                     .arg(recordPath_),
+                                 5000);
+        recordPath_.clear();
+        return;
+    }
+    const QString suggested =
+        QDir(QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation))
+            .filePath(QStringLiteral("recording-%1.sacap")
+                          .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmmss"))));
+    const QString path =
+        QFileDialog::getSaveFileName(this, tr("Record to"), suggested, tr("Captures (*.sacap)"));
+    const auto undoToggle = [this] {
+        const QSignalBlocker blocker(recordButton_);
+        recordButton_->setChecked(false);
+    };
+    if (path.isEmpty()) {
+        undoToggle();  // dialog cancelled
+        return;
+    }
+    try {
+        pipeline_->startRecording(path.toStdString());
+        recordPath_ = path;
+    } catch (const std::exception& e) {
+        QMessageBox::critical(this, tr("Cannot record"), QString::fromStdString(e.what()));
+        undoToggle();
+    }
+}
+
+void MainWindow::openRecording() {
+    const QString path = QFileDialog::getOpenFileName(
+        this, tr("Open recording"), QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation),
+        tr("Captures (*.sacap);;All files (*)"));
+    if (!path.isEmpty()) {
+        startPipeline(path);
+    }
 }
 
 void MainWindow::updateSpectrumScale() {
@@ -302,31 +396,37 @@ void MainWindow::refresh() {
         return;
     }
 
-    if (!pipeline_->running()) {
-        const QString err = QString::fromStdString(pipeline_->lastError());
-        stopPipeline();
-        if (!err.isEmpty()) {
-            QMessageBox::warning(this, tr("Acquisition stopped"), err);
-        }
-        return;
-    }
-
+    // Read before collecting the frames: if the pipeline had already stopped (a
+    // replay that ended), the frames collected below are its final ones.
+    const bool running = pipeline_->running();
     const auto stats = pipeline_->stats();
-    statusBar()->showMessage(
-        tr("Port %1 | channels %2 | frames %3 | malformed %4 | dropped samples %5 | buffer %6")
-            .arg(pipeline_->port())
-            .arg(qulonglong(stats.channels.size()))
-            .arg(qulonglong(stats.framesComputed))
-            .arg(qulonglong(stats.packetsMalformed))
-            .arg(qulonglong(stats.samplesDropped))
-            .arg(qulonglong(stats.bufferFill)));
-
     channelStats_ = stats.channels;
     for (const sa::ChannelStats& c : channelStats_) {
         if (auto frame = pipeline_->latestFrame(c.channel)) {
             latestFrames_[c.channel] = std::move(frame);
         }
     }
+
+    QString source = pipeline_->replaying()
+                         ? tr("Replay %1 %").arg(pipeline_->replayProgress() * 100.0, 0, 'f', 0)
+                         : tr("Port %1").arg(pipeline_->port());
+    const auto recording = pipeline_->recordingStatus();
+    if (recording.active) {
+        source += tr(" | REC %1 kB").arg(double(recording.bytes) / 1024.0, 0, 'f', 0);
+    } else if (!recording.error.empty() && !recordPath_.isEmpty()) {
+        recordPath_.clear();
+        setControlsRunning(true);  // un-check Record
+        QMessageBox::warning(this, tr("Recording stopped"), QString::fromStdString(recording.error));
+    }
+    statusBar()->showMessage(
+        tr("%1 | channels %2 | frames %3 | malformed %4 | dropped samples %5 | buffer %6")
+            .arg(source)
+            .arg(qulonglong(stats.channels.size()))
+            .arg(qulonglong(stats.framesComputed))
+            .arg(qulonglong(stats.packetsMalformed))
+            .arg(qulonglong(stats.samplesDropped))
+            .arg(qulonglong(stats.bufferFill)));
+
     // Follow the data if the selected channel has none, e.g. a sender on channel 3 only.
     const bool selectedPresent = std::any_of(channelStats_.begin(), channelStats_.end(),
                                              [this](const auto& c) { return c.channel == channel_; });
@@ -336,17 +436,29 @@ void MainWindow::refresh() {
     updateChannelTable();
 
     const auto frames = pipeline_->framesSince(channel_, lastFrameIndex_);
-    if (frames.empty()) {
-        return;
+    if (!frames.empty()) {
+        // Every frame becomes a spectrogram row; the other views only need the newest.
+        const double hop = static_cast<double>(pipeline_->config().hopSize);
+        for (const auto& frame : frames) {
+            spectrogram_->addSpectrum(frame->spectrum, frame->binHz, hop / frame->sampleRate);
+        }
+        lastFrameIndex_ = frames.back()->index;
+        shownFrame_ = frames.back();
+        showFrame(*shownFrame_);
     }
-    // Every frame becomes a spectrogram row; the other views only need the newest.
-    const double hop = static_cast<double>(pipeline_->config().hopSize);
-    for (const auto& frame : frames) {
-        spectrogram_->addSpectrum(frame->spectrum, frame->binHz, hop / frame->sampleRate);
+
+    if (!running) {
+        // A replay that has ended (no error), or a failure.
+        const QString err = QString::fromStdString(pipeline_->lastError());
+        const QString finishedReplay = err.isEmpty() ? replayFile_ : QString();
+        stopPipeline();
+        if (!finishedReplay.isEmpty()) {
+            statusBar()->showMessage(tr("Replay finished: %1").arg(finishedReplay));
+        }
+        if (!err.isEmpty()) {
+            QMessageBox::warning(this, tr("Acquisition stopped"), err);
+        }
     }
-    lastFrameIndex_ = frames.back()->index;
-    shownFrame_ = frames.back();
-    showFrame(*shownFrame_);
 }
 
 void MainWindow::updateChannelTable() {

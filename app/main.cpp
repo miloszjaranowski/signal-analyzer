@@ -9,5 +9,9 @@ int main(int argc, char* argv[]) {
 
     MainWindow window;
     window.show();
+    // signal_analyzer [recording.sacap]: replay a capture right away.
+    if (const QStringList args = QApplication::arguments(); args.size() > 1) {
+        window.replay(args.at(1));
+    }
     return QApplication::exec();
 }
