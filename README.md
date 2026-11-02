@@ -139,6 +139,12 @@ python simulator/sensor_sim.py --channels 3 --gains 1,0.5,0.25 --fault-hz 177.5 
 python simulator/sensor_sim.py --help
 ```
 
+### A real sensor: ESP32 + ADXL345
+
+[firmware/esp32-adxl345](firmware/esp32-adxl345/README.md) turns an ESP32 board and an
+ADXL345 accelerometer into a WiFi sensor: X, Y and Z at 3200 Hz as channels 0–2, in the
+same packets as the simulator. Wiring, flashing and analyzer settings are in its README.
+
 ### Recording and replay
 
 Every received datagram can be recorded, byte for byte with its arrival time, to a
@@ -304,6 +310,7 @@ cli/       headless front-end
 tests/     GoogleTest unit and integration tests
 simulator/ Python UDP sensor simulator
 tools/     sacap.py: capture files to / from CSV and HDF5
+firmware/  esp32-adxl345: ESP32 + ADXL345 WiFi vibration sensor (PlatformIO)
 ```
 
 ## Roadmap
@@ -315,5 +322,7 @@ tools/     sacap.py: capture files to / from CSV and HDF5
 - [x] Fatigue refinements: endurance limit / two-slope S-N curve, mean-stress correction
 - [x] Multi-channel streams
 - [x] Recording to file / replay (CSV, HDF5)
-- [ ] ESP32 + MEMS accelerometer as a real sensor
+- [ ] ESP32 + MEMS accelerometer as a real sensor: firmware for ESP32 + ADXL345 in
+  [firmware/esp32-adxl345](firmware/esp32-adxl345/README.md), builds, awaiting a test on
+  hardware
 - [ ] Benchmark: sustained sample rate vs. FFT size

@@ -12,6 +12,8 @@
 #include "sa/Protocol.hpp"
 #include "sa/Udp.hpp"
 
+#include "../firmware/esp32-adxl345/src/Sap1.hpp"
+
 using namespace std::chrono_literals;
 
 namespace {
@@ -94,6 +96,23 @@ TEST(Protocol, RejectsMalformed) {
     badChannel.sampleRate = 1000;
     badChannel.channel = sa::kMaxChannels;
     EXPECT_FALSE(sa::parsePacket(sa::serializePacket(badChannel, samples), parsed, out));
+}
+
+// The ESP32 firmware builds its packets with its own header-only code; the
+// analyzer must accept them byte for byte.
+TEST(Protocol, AcceptsFirmwarePackets) {
+    const float samples[4] = {0.0f, 1.0f, -0.5f, 0.0039f};
+    std::vector<std::byte> bytes(sap1::packetSize(4));
+    const auto size = sap1::build(reinterpret_cast<std::uint8_t*>(bytes.data()), 77, 3187, 2, samples, 4);
+    ASSERT_EQ(size, bytes.size());
+
+    sa::PacketHeader h;
+    std::vector<float> out;
+    ASSERT_TRUE(sa::parsePacket(bytes, h, out));
+    EXPECT_EQ(h.sequence, 77u);
+    EXPECT_EQ(h.sampleRate, 3187u);
+    EXPECT_EQ(h.channel, 2u);
+    EXPECT_EQ(out, std::vector<float>(std::begin(samples), std::end(samples)));
 }
 
 // Two interleaved channels with different signals and their own sequence

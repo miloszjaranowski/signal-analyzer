@@ -5,3 +5,6 @@ build*/
 __pycache__/
 .venv/
 CMakeUserPresets.json
+.pio/
+# Firmware settings with the WiFi password; the template is config.example.h
+firmware/*/src/config.h
