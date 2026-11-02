@@ -17,10 +17,12 @@
 // app shows it as channels 3..5 (the protocol allows channels 0..7).
 #define FIRST_CHANNEL 0
 
-// --- Wiring (ESP32 VSPI) -----------------------------------------------------------
-#define PIN_SCK 18
-#define PIN_MISO 19   // ADXL345 SDO
-#define PIN_MOSI 23   // ADXL345 SDA (SDI in SPI mode)
-#define PIN_CS 5      // ADXL345 CS
-#define PIN_INT1 4    // ADXL345 INT1
-#define PIN_LED 2     // on-board LED of the DevKit V1; -1 if your board has none
+// --- Wiring -------------------------------------------------------------------------
+// Defaults depend on the chip (ESP32 or ESP32-S3), see Pins.hpp and README.md.
+// Only to wire differently, uncomment and change:
+// #define PIN_SCK 12
+// #define PIN_MISO 13   // ADXL345 SDO
+// #define PIN_MOSI 11   // ADXL345 SDA
+// #define PIN_CS 10
+// #define PIN_INT1 4
+// #define PIN_LED -1    // -1: no plain LED

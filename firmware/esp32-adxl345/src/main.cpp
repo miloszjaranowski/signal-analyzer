@@ -25,6 +25,7 @@
 #else
 #error "Copy src/config.example.h to src/config.h and fill in your WiFi and PC address"
 #endif
+#include "Pins.hpp"  // after config.h, which may override the defaults
 
 namespace {
 

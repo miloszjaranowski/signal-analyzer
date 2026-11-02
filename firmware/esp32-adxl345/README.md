@@ -1,6 +1,6 @@
 # ESP32 + ADXL345 vibration sensor
 
-Firmware that turns an ESP32 and an ADXL345 accelerometer into a WiFi vibration sensor
+Firmware that turns an ESP32 or ESP32-S3 and an ADXL345 accelerometer into a WiFi vibration sensor
 for Signal Analyzer. It samples X, Y and Z at 3200 Hz and streams them over UDP in the
 same SAP1 packets as the simulator, as channels 0, 1 and 2. The analyzer needs no changes.
 
@@ -24,43 +24,58 @@ on hardware.
 
 ## Parts
 
-- ESP32 board with an ESP32-WROOM-32 module: ESP32 DevKit V1, YD-ESP32-23 or similar
+- An ESP32 or ESP32-S3 board. Both are supported, with different pins (below):
+  - ESP32-S3: YD-ESP32-S3 / YD-ESP32-23, ESP32-S3-DevKitC-1 → environment `esp32s3`
+  - classic ESP32 (ESP32-WROOM-32): ESP32 DevKit V1 and similar → environment `esp32`
+
+  Not sure which chip a board has? Upload with either environment: esptool stops with
+  `This chip is ESP32-S3, not ESP32` (or the other way round), and nothing is written.
 - ADXL345 breakout, e.g. GY-291
 - 7 jumper wires, a USB data cable (some cables only charge)
 
 ## Wiring (SPI)
 
-| ADXL345 (GY-291) | ESP32   | Note                             |
-|------------------|---------|----------------------------------|
-| VCC / 3V3        | 3V3     | 3.3 V, not 5 V                   |
-| GND              | GND     |                                  |
-| CS               | GPIO 5  | a CS driven low selects SPI mode |
-| SDO              | GPIO 19 | MISO                             |
-| SDA              | GPIO 23 | MOSI (SDI in SPI mode)           |
-| SCL              | GPIO 18 | SCLK                             |
-| INT1             | GPIO 4  | FIFO watermark interrupt         |
+| ADXL345 (GY-291) | ESP32-S3 | ESP32   | Note                             |
+|------------------|----------|---------|----------------------------------|
+| VCC / 3V3        | 3V3      | 3V3     | 3.3 V, not 5 V                   |
+| GND              | GND      | GND     |                                  |
+| CS               | GPIO 10  | GPIO 5  | a CS driven low selects SPI mode |
+| SDO              | GPIO 13  | GPIO 19 | MISO                             |
+| SDA              | GPIO 11  | GPIO 23 | MOSI (SDI in SPI mode)           |
+| SCL              | GPIO 12  | GPIO 18 | SCLK                             |
+| INT1             | GPIO 4   | GPIO 4  | FIFO watermark interrupt         |
 
-Keep the wires short (up to 10-15 cm). Other pins can be set in `config.h`. Board pin
-labels differ between makers, so go by the GPIO numbers printed on the board.
+The two chips need different pins: on the ESP32-S3, GPIO 22–25 do not exist, 19/20 are
+the native USB port and 26–37 belong to flash and PSRAM. The defaults live in
+`src/Pins.hpp`. A pin can be changed in `config.h`, and the build refuses pins the S3
+cannot use.
+
+Keep the wires short (up to 10-15 cm). Board pin labels differ between makers, so go by
+the GPIO numbers printed on the board.
 
 ## Build and flash
 
 1. **PlatformIO**: install the *PlatformIO IDE* extension in VS Code, or
    `pip install platformio` for the command line.
 2. **USB driver**: plug the board in and open Device Manager → *Ports (COM & LPT)*. It
-   should show *Silicon Labs CP210x* or *USB-SERIAL CH340* with a COM port. If it shows
-   an unknown device, install the driver for the USB chip on your board (CP210x from
-   Silicon Labs, or CH340 from WCH).
+   should show *Silicon Labs CP210x* or *USB-SERIAL CH340/CH343* with a COM port. If it
+   shows an unknown device, install the driver for the USB chip on your board (CP210x
+   from Silicon Labs, or CH34x from WCH). Boards with two USB-C ports (YD-ESP32-S3):
+   use the one labelled **COM**; the serial log appears there.
 3. **Configuration**: copy `src/config.example.h` to `src/config.h` and fill in:
    - `WIFI_SSID`, `WIFI_PASSWORD`: a 2.4 GHz network (the ESP32 has no 5 GHz radio)
    - `TARGET_HOST`: the IPv4 address of the PC running the analyzer (`ipconfig`), on the
      same network
 
-   `config.h` is git-ignored because it holds your password.
-4. **Flash**:
+   `config.h` is git-ignored because it holds your password. It no longer needs pin
+   numbers; if yours (from an earlier version) still has `#define PIN_...` lines,
+   delete them so the defaults for your chip apply.
+4. **Flash**: pick the environment for your chip, `esp32s3` (the default) or `esp32`.
    - VS Code: *File → Open Folder* on `firmware/esp32-adxl345` (this folder, not the
-     repository root), then *PlatformIO: Upload* (→ in the status bar).
-   - Command line: `pio run -d firmware/esp32-adxl345 -t upload`
+     repository root). Choose the environment in the status bar (*env:esp32s3* /
+     *env:esp32*), then *PlatformIO: Upload* (→ in the status bar).
+   - Command line: `pio run -d firmware/esp32-adxl345 -e esp32s3 -t upload`
+     (or `-e esp32`)
 
    The first build downloads the ESP32 platform and toolchain: about 5.5 GB for
    `espressif32` 8.0, into `%USERPROFILE%\.platformio`. Later builds take seconds.
@@ -78,8 +93,9 @@ labels differ between makers, so go by the GPIO numbers printed on the board.
    rate 3187.2 Hz (sent as 3187) | samples +15936 | packets 563, send errors 0 | dropped blocks: queue 0, offline 0 | FIFO full 0 | RSSI -52 dBm
    ```
 
-   The on-board LED is on while connected, blinks slowly while connecting, and blinks
-   fast if the sensor is not found.
+   On the DevKit V1 the blue on-board LED is on while connected, blinks slowly while
+   connecting, and blinks fast if the sensor is not found. The S3 boards have an RGB
+   LED instead, which this firmware leaves alone: watch the serial log.
 
 ## Receive on the PC
 
@@ -108,6 +124,7 @@ isolate WiFi clients (guest networks usually do).
 
 | Symptom | Likely cause |
 | ------- | ------------ |
+| `This chip is ESP32-S3, not ESP32` (or the reverse) | Wrong environment: upload with `-e esp32s3` / `-e esp32` |
 | `ADXL345 not found (device ID 0x00)` or `0xFF` | Wiring: CS, SDO→MISO, power. A floating CS leaves the chip in I2C mode. |
 | `Connecting...` never ends | Wrong SSID or password, or a 5 GHz-only network |
 | `packets` grows, PC receives nothing | Firewall, wrong `TARGET_HOST`, client isolation, PC on another network |
